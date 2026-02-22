@@ -29,11 +29,11 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 핵심 진입 파일:
 
-- `/home/runner/work/AionUi/AionUi/src/index.ts`
-- `/home/runner/work/AionUi/AionUi/src/preload.ts`
-- `/home/runner/work/AionUi/AionUi/src/renderer/main.tsx`
-- `/home/runner/work/AionUi/AionUi/src/process/index.ts`
-- `/home/runner/work/AionUi/AionUi/src/process/bridge/index.ts`
+- `src/index.ts`
+- `src/preload.ts`
+- `src/renderer/main.tsx`
+- `src/process/index.ts`
+- `src/process/bridge/index.ts`
 
 ---
 
@@ -94,8 +94,8 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 ### 1) 메시지 스트리밍/중복/누락
 
-- `/home/runner/work/AionUi/AionUi/src/process/database/StreamingMessageBuffer.ts`
-- `/home/runner/work/AionUi/AionUi/src/renderer/messages/hooks.ts`
+- `src/process/database/StreamingMessageBuffer.ts`
+- `src/renderer/messages/hooks.ts`
 
 관찰 포인트:
 
@@ -104,8 +104,8 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 ### 2) 에이전트 감지/모드 전환 오류
 
-- `/home/runner/work/AionUi/AionUi/src/renderer/hooks/useMultiAgentDetection.tsx`
-- `/home/runner/work/AionUi/AionUi/src/process/bridge/conversationBridge.ts`
+- `src/renderer/hooks/useMultiAgentDetection.tsx`
+- `src/process/bridge/conversationBridge.ts`
 
 관찰 포인트:
 
@@ -114,9 +114,9 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 ### 3) 파일 드래그&드롭/워크스페이스 경로 처리
 
-- `/home/runner/work/AionUi/AionUi/src/renderer/pages/conversation/workspace/hooks/useWorkspaceDragImport.ts`
-- `/home/runner/work/AionUi/AionUi/src/process/bridge/fsBridge.ts`
-- `/home/runner/work/AionUi/AionUi/src/preload.ts`
+- `src/renderer/pages/conversation/workspace/hooks/useWorkspaceDragImport.ts`
+- `src/process/bridge/fsBridge.ts`
+- `src/preload.ts`
 
 관찰 포인트:
 
@@ -125,9 +125,9 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 ### 4) 스케줄 작업(Cron) 재시작 후 동작
 
-- `/home/runner/work/AionUi/AionUi/src/process/services/cron/CronService.ts`
-- `/home/runner/work/AionUi/AionUi/src/process/database/schema.ts`
-- `/home/runner/work/AionUi/AionUi/src/index.ts` (resume 관련)
+- `src/process/services/cron/CronService.ts`
+- `src/process/database/schema.ts`
+- `src/index.ts` (resume 관련)
 
 관찰 포인트:
 
@@ -136,9 +136,9 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 ### 5) WebUI 인증/비밀번호 리셋 경로
 
-- `/home/runner/work/AionUi/AionUi/src/process/bridge/webuiBridge.ts`
-- `/home/runner/work/AionUi/AionUi/src/webserver/auth/service/AuthService.ts`
-- `/home/runner/work/AionUi/AionUi/src/preload.ts`
+- `src/process/bridge/webuiBridge.ts`
+- `src/webserver/auth/service/AuthService.ts`
+- `src/preload.ts`
 
 관찰 포인트:
 
@@ -151,13 +151,13 @@ AionUi는 Electron 기반 멀티 프로세스 앱입니다.
 
 ### 테스트 위치
 
-- `/home/runner/work/AionUi/AionUi/tests/unit`
-- 설정: `/home/runner/work/AionUi/AionUi/jest.config.js`
+- `tests/unit`
+- 설정: `jest.config.js`
 
 ### 기본 명령어
 
 ```bash
-cd /home/runner/work/AionUi/AionUi
+cd AionUi
 npm run lint
 npm test -- --runInBand
 ```
