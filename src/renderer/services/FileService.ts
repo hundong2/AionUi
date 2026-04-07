@@ -5,6 +5,78 @@
  */
 
 import { ipcBridge } from '@/common';
+import { trackUpload, type UploadSource } from '@/renderer/hooks/file/useUploadState';
+import { isElectronDesktop } from '@/renderer/utils/platform';
+
+/** Max upload size in MB — keep in sync with server-side MAX_UPLOAD_SIZE in apiRoutes.ts */
+export const MAX_UPLOAD_SIZE_MB = 30;
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+/**
+ * Upload a file to the server via HTTP multipart (WebUI mode).
+ * Conversation-bound uploads go to the workspace uploads directory; pre-conversation uploads go to temp storage.
+ *
+ * @param onProgress Optional callback receiving upload percentage (0-100).
+ */
+export async function uploadFileViaHttp(
+  file: File,
+  conversationId?: string,
+  onProgress?: (percent: number) => void
+): Promise<string> {
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    throw new Error('FILE_TOO_LARGE');
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+  if (conversationId) {
+    formData.append('conversationId', conversationId);
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    xhr.withCredentials = true;
+
+    if (onProgress) {
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      });
+    }
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 413) {
+        reject(new Error('FILE_TOO_LARGE'));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        return;
+      }
+      try {
+        const result = JSON.parse(xhr.responseText) as { success: boolean; data?: { path: string } };
+        if (!result.success || !result.data) {
+          reject(new Error('Upload failed: server returned unsuccessful response'));
+        } else {
+          resolve(result.data.path);
+        }
+      } catch {
+        reject(new Error('Upload failed: invalid server response'));
+      }
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('Upload failed: network error'));
+    });
+
+    xhr.addEventListener('abort', () => {
+      reject(new Error('Upload aborted'));
+    });
+
+    xhr.send(formData);
+  });
+}
 // Simple formatBytes implementation moved from deleted updateConfig
 function formatBytes(bytes: number, decimals = 2): string {
   if (bytes === 0) return '0 Bytes';
@@ -26,7 +98,34 @@ export const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.sv
 export const documentExts = ['.pdf', '.doc', '.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods'];
 
 /** 支持的文本文件扩展名 */
-export const textExts = ['.txt', '.md', '.json', '.xml', '.csv', '.log', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.py', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.yml', '.yaml', '.toml', '.ini', '.conf', '.config'];
+export const textExts = [
+  '.txt',
+  '.md',
+  '.json',
+  '.xml',
+  '.csv',
+  '.log',
+  '.js',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.html',
+  '.css',
+  '.scss',
+  '.py',
+  '.java',
+  '.cpp',
+  '.c',
+  '.h',
+  '.go',
+  '.rs',
+  '.yml',
+  '.yaml',
+  '.toml',
+  '.ini',
+  '.conf',
+  '.config',
+];
 
 /** 所有支持的文件扩展名（预先设计，当前实际接受所有文件类型） */
 export const allSupportedExts = [...imageExts, ...documentExts, ...textExts];
@@ -59,7 +158,7 @@ export function getFileExtension(fileName: string): string {
   return lastDotIndex > -1 ? fileName.substring(lastDotIndex).toLowerCase() : '';
 }
 
-import { AIONUI_TIMESTAMP_REGEX } from '@/common/constants';
+import { AIONUI_TIMESTAMP_REGEX } from '@/common/config/constants';
 
 // 清理AionUI时间戳后缀，返回原始文件名
 export function cleanAionUITimestamp(fileName: string): string {
@@ -157,9 +256,14 @@ export function isTextFile(fileName: string): boolean {
 
 class FileServiceClass {
   /**
-   * Process files from drag and drop events, creating temporary files for files without valid paths
+   * Process files from drag and drop events, creating temporary files for files without valid paths.
+   * In WebUI mode, uploads files via HTTP to the conversation workspace uploads directory.
    */
-  async processDroppedFiles(files: FileList): Promise<FileMetadata[]> {
+  async processDroppedFiles(
+    files: FileList,
+    conversationId?: string,
+    source: UploadSource = 'sendbox'
+  ): Promise<FileMetadata[]> {
     const processedFiles: FileMetadata[] = [];
 
     for (let i = 0; i < files.length; i++) {
@@ -169,22 +273,33 @@ class FileServiceClass {
 
       let filePath = electronFile.path || '';
 
-      // If no valid path (some dragged files may not have paths), create temporary file
+      // If no valid path (WebUI or some dragged files may not have paths), create temporary file
       if (!filePath) {
         try {
-          // Read file content
-          const arrayBuffer = await file.arrayBuffer();
-          const uint8Array = new Uint8Array(arrayBuffer);
-
-          // Create temporary file
-          const tempPath = await ipcBridge.fs.createTempFile.invoke({ fileName: file.name });
-          if (tempPath) {
-            await ipcBridge.fs.writeFile.invoke({ path: tempPath, data: uint8Array });
-            filePath = tempPath;
+          if (!isElectronDesktop()) {
+            // WebUI: upload via HTTP multipart to the conversation workspace uploads directory
+            const tracker = trackUpload(file.size, source);
+            try {
+              filePath = await uploadFileViaHttp(file, conversationId || '', tracker.onProgress);
+            } finally {
+              tracker.finish();
+            }
+          } else {
+            // Electron: use IPC to create temp file
+            const arrayBuffer = await file.arrayBuffer();
+            const uint8Array = new Uint8Array(arrayBuffer);
+            const tempPath = await ipcBridge.fs.createTempFile.invoke({ fileName: file.name });
+            if (tempPath) {
+              await ipcBridge.fs.writeFile.invoke({ path: tempPath, data: uint8Array });
+              filePath = tempPath;
+            }
           }
         } catch (error) {
+          // Re-throw size errors so caller can show user-facing toast
+          if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+            throw error;
+          }
           console.error('Failed to create temp file for dragged file:', error);
-          // Skip failed files instead of using invalid paths
           continue;
         }
       }

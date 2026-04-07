@@ -13,13 +13,43 @@
  * the app is launched from Finder / launchd instead of a terminal.
  */
 
-import { execFile, execFileSync } from 'child_process';
-import { accessSync, readdirSync } from 'fs';
+import { getPlatformServices } from '@/common/platform';
+import { execFile, execFileSync, spawn } from 'child_process';
+import { accessSync, existsSync, readdirSync } from 'fs';
 import os from 'os';
 import path from 'path';
 
 /** Enable ACP performance diagnostics via ACP_PERF=1 */
 const PERF_LOG = process.env.ACP_PERF === '1';
+
+// ---------------------------------------------------------------------------
+// Bundled bun runtime
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the directory containing the bundled bun binary.
+ * Returns the path to `resources/bundled-bun/<platform>-<arch>/` which contains
+ * the bun executable. Returns null if the directory doesn't exist.
+ */
+export function getBundledBunDir(): string | null {
+  const resourcesPath = getPlatformServices().paths.isPackaged()
+    ? process.resourcesPath
+    : path.join(process.cwd(), 'resources');
+  const platform = process.platform === 'win32' ? 'win32' : process.platform;
+  const arch = process.arch;
+  const bunDir = path.join(resourcesPath, 'bundled-bun', `${platform}-${arch}`);
+  return existsSync(bunDir) ? bunDir : null;
+}
+
+/**
+ * Get the path to the user's bun global bin directory.
+ * This is where `bun add -g` installs binaries.
+ * - macOS/Linux: ~/.bun/bin
+ * - Windows: %USERPROFILE%\.bun\bin
+ */
+export function getBunGlobalBinDir(): string {
+  return path.join(os.homedir(), '.bun', 'bin');
+}
 
 /**
  * Environment variables to inherit from user's shell.
@@ -45,6 +75,51 @@ const SHELL_INHERITED_ENV_VARS = [
 let cachedShellEnv: Record<string, string> | null = null;
 
 /**
+ * Resolve the user's login shell path.
+ * Falls back to /bin/zsh on macOS, /bin/bash on Linux, or /bin/sh as last resort.
+ * When Electron is launched from Finder/launchd, process.env.SHELL is often unset,
+ * so we query the system instead of defaulting to bash.
+ */
+function resolveLoginShell(): string {
+  // macOS: use dscl to read the user's login shell from Directory Service
+  if (process.platform === 'darwin') {
+    try {
+      const shell = execFileSync('dscl', ['.', '-read', `/Users/${os.userInfo().username}`, 'UserShell'], {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+        .trim()
+        .split(/\s+/)
+        .pop();
+      if (shell && path.isAbsolute(shell)) return shell;
+    } catch {
+      /* dscl failed, fall through */
+    }
+    return '/bin/zsh'; // macOS default since Catalina
+  }
+
+  // Linux: read /etc/passwd
+  if (process.platform === 'linux') {
+    try {
+      const passwd = execFileSync('getent', ['passwd', os.userInfo().username], {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const shell = passwd.split(':').pop();
+      if (shell && path.isAbsolute(shell)) return shell;
+    } catch {
+      /* getent failed, fall through */
+    }
+    return '/bin/bash'; // Linux default
+  }
+
+  // Windows: not used (shell env loading is skipped on Windows)
+  return process.env.SHELL || '/bin/sh';
+}
+
+/**
  * Load environment variables from user's login shell.
  * Captures variables set in .bashrc, .zshrc, .bash_profile, etc.
  *
@@ -66,14 +141,16 @@ function loadShellEnvironment(): Record<string, string> {
   }
 
   try {
-    const shell = process.env.SHELL || '/bin/bash';
+    const shell = resolveLoginShell();
     if (!path.isAbsolute(shell)) {
-      console.warn('[ShellEnv] SHELL is not an absolute path, skipping shell env loading:', shell);
+      console.warn('[ShellEnv] Resolved shell is not an absolute path, skipping shell env loading:', shell);
       return cachedShellEnv;
     }
-    // Use -i (interactive) and -l (login) to load all shell configs
-    // including .bashrc, .zshrc, .bash_profile, .zprofile, etc.
-    const output = execFileSync(shell, ['-i', '-l', '-c', 'env'], {
+    // Use -l (login) to load login shell configs (.bash_profile, .zprofile, etc.)
+    // NOTE: Do NOT use -i (interactive) — interactive shells call tcsetpgrp() to
+    // grab the terminal foreground process group and do not restore it on exit,
+    // which prevents Ctrl+C from delivering SIGINT to the server process.
+    const output = execFileSync(shell, ['-l', '-c', 'env'], {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -97,7 +174,10 @@ function loadShellEnvironment(): Record<string, string> {
     }
   } catch (error) {
     // Silent fail - shell environment loading is best-effort
-    console.warn('[ShellEnv] Failed to load shell environment:', error instanceof Error ? error.message : String(error));
+    console.warn(
+      '[ShellEnv] Failed to load shell environment:',
+      error instanceof Error ? error.message : String(error)
+    );
   }
 
   if (PERF_LOG) console.log(`[ShellEnv] connect: shell env loaded ${Date.now() - startTime}ms`);
@@ -124,9 +204,9 @@ export async function loadShellEnvironmentAsync(): Promise<Record<string, string
   const startTime = Date.now();
 
   try {
-    const shell = process.env.SHELL || '/bin/bash';
+    const shell = resolveLoginShell();
     if (!path.isAbsolute(shell)) {
-      console.warn('[ShellEnv] SHELL is not an absolute path, skipping async shell env loading:', shell);
+      console.warn('[ShellEnv] Resolved shell is not an absolute path, skipping async shell env loading:', shell);
       cachedShellEnv = {};
       return cachedShellEnv;
     }
@@ -134,7 +214,7 @@ export async function loadShellEnvironmentAsync(): Promise<Record<string, string
     const output = await new Promise<string>((resolve, reject) => {
       execFile(
         shell,
-        ['-i', '-l', '-c', 'env'],
+        ['-l', '-c', 'env'],
         {
           encoding: 'utf-8',
           timeout: 5000,
@@ -167,7 +247,10 @@ export async function loadShellEnvironmentAsync(): Promise<Record<string, string
     if (PERF_LOG) console.log(`[ShellEnv] preload: shell env async loaded ${Date.now() - startTime}ms`);
   } catch (error) {
     cachedShellEnv = {};
-    console.warn('[ShellEnv] Failed to async load shell environment:', error instanceof Error ? error.message : String(error));
+    console.warn(
+      '[ShellEnv] Failed to async load shell environment:',
+      error instanceof Error ? error.message : String(error)
+    );
   }
 
   return cachedShellEnv;
@@ -206,19 +289,132 @@ export function mergePaths(path1?: string, path2?: string): string {
 }
 
 /**
+ * Scan well-known Windows tool installation directories and return any that exist
+ * but are not already in the current PATH.
+ *
+ * On Windows, apps launched via shortcuts or the Start menu may miss user-local
+ * tool paths (e.g. npm global packages, nvm-windows, Scoop, Volta) that are
+ * added to PATH only when a shell session starts.
+ *
+ * 扫描 Windows 常见工具安装目录，返回当前 PATH 中缺少的路径。
+ */
+function getWindowsExtraToolPaths(): string[] {
+  if (process.platform !== 'win32') return [];
+
+  const homeDir = os.homedir();
+  const appData = process.env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
+  const localAppData = process.env.LOCALAPPDATA || path.join(homeDir, 'AppData', 'Local');
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+  const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const currentPath = process.env.PATH || '';
+
+  const candidates = [
+    // npm global packages (most common - installed with Node.js)
+    path.join(appData, 'npm'),
+    // Node.js official installer
+    path.join(programFiles, 'nodejs'),
+    // nvm-windows: %APPDATA%\nvm (the active version symlink lives here)
+    process.env.NVM_HOME || path.join(appData, 'nvm'),
+    // nvm-windows symlink directory (where the active node version is linked)
+    process.env.NVM_SYMLINK || path.join(programFiles, 'nodejs'),
+    // fnm-windows: FNM_MULTISHELL_PATH is set per-shell session
+    ...(process.env.FNM_MULTISHELL_PATH ? [process.env.FNM_MULTISHELL_PATH] : []),
+    path.join(localAppData, 'fnm_multishells'),
+    // Volta: cross-platform Node version manager
+    path.join(homeDir, '.volta', 'bin'),
+    // Scoop: Windows package manager
+    process.env.SCOOP ? path.join(process.env.SCOOP, 'shims') : path.join(homeDir, 'scoop', 'shims'),
+    // pnpm global store shims
+    path.join(localAppData, 'pnpm'),
+    // Chocolatey
+    path.join(process.env.ChocolateyInstall || 'C:\\ProgramData\\chocolatey', 'bin'),
+    // Git for Windows — provides cygpath, git, and POSIX utilities.
+    // Claude Code's agent-sdk calls `cygpath` internally on Windows; if this
+    // directory is missing from PATH the SDK fails with "cygpath: not found".
+    path.join(programFiles, 'Git', 'cmd'),
+    path.join(programFiles, 'Git', 'bin'),
+    path.join(programFiles, 'Git', 'usr', 'bin'),
+    path.join(programFilesX86, 'Git', 'cmd'),
+    path.join(programFilesX86, 'Git', 'bin'),
+    path.join(programFilesX86, 'Git', 'usr', 'bin'),
+    // Cygwin — alternative source for cygpath
+    'C:\\cygwin64\\bin',
+    'C:\\cygwin\\bin',
+    // bun global packages
+    getBunGlobalBinDir(),
+  ];
+
+  return candidates.filter((p) => existsSync(p) && !currentPath.includes(p));
+}
+
+/**
+ * Scan well-known POSIX tool installation directories and return any that exist
+ * but are not already in the current PATH.
+ *
+ * Similar to getWindowsExtraToolPaths but for macOS/Linux.
+ * Covers global bin directories for bun, cargo, go, deno, etc.
+ */
+function getPosixExtraToolPaths(): string[] {
+  if (process.platform === 'win32') return [];
+
+  const homeDir = os.homedir();
+  const currentPath = process.env.PATH || '';
+
+  const candidates = [
+    // bun global packages
+    getBunGlobalBinDir(),
+    // cargo (Rust)
+    path.join(homeDir, '.cargo', 'bin'),
+    // go
+    path.join(homeDir, 'go', 'bin'),
+    // deno
+    path.join(homeDir, '.deno', 'bin'),
+    // local bin (pip, pipx, etc.)
+    path.join(homeDir, '.local', 'bin'),
+  ];
+
+  return candidates.filter((p) => existsSync(p) && !currentPath.includes(p));
+}
+
+/**
  * Get enhanced environment variables by merging shell env with process.env.
  * For PATH, we merge both sources to ensure CLI tools are found regardless of
  * how the app was started (terminal vs Finder/launchd).
  *
+ * On Windows, also appends well-known tool paths (npm globals, nvm, volta, scoop)
+ * that may not be present when Electron starts from a shortcut.
+ *
  * 获取增强的环境变量，合并 shell 环境变量和 process.env。
  * 对于 PATH，合并两个来源以确保无论应用如何启动都能找到 CLI 工具。
+ * 在 Windows 上，还会追加常见工具路径（npm 全局包、nvm、volta、scoop 等）。
  */
 export function getEnhancedEnv(customEnv?: Record<string, string>): Record<string, string> {
   const shellEnv = loadShellEnvironment();
+  const separator = process.platform === 'win32' ? ';' : ':';
 
   // Merge PATH from both sources (shell env may miss nvm/fnm paths in dev mode)
   // 合并两个来源的 PATH（开发模式下 shell 环境可能缺少 nvm/fnm 路径）
-  const mergedPath = mergePaths(process.env.PATH, shellEnv.PATH);
+  let mergedPath = mergePaths(process.env.PATH, shellEnv.PATH);
+
+  // On Windows, also append any discovered tool paths not already in PATH
+  // 在 Windows 上，追加未在 PATH 中的常见工具路径
+  const winExtraPaths = getWindowsExtraToolPaths();
+  if (winExtraPaths.length > 0) {
+    mergedPath = mergePaths(mergedPath, winExtraPaths.join(';'));
+  }
+
+  // On macOS/Linux, append well-known global bin directories (bun, cargo, go, etc.)
+  const posixExtraPaths = getPosixExtraToolPaths();
+  if (posixExtraPaths.length > 0) {
+    mergedPath = mergePaths(mergedPath, posixExtraPaths.join(':'));
+  }
+
+  // Prepend bundled bun directory (highest priority — ensures extensions always
+  // have access to bun/bunx even if the user hasn't installed it)
+  const bundledBunDir = getBundledBunDir();
+  if (bundledBunDir) {
+    mergedPath = `${bundledBunDir}${separator}${mergedPath}`;
+  }
 
   return {
     ...process.env,
@@ -246,7 +442,10 @@ export function findSuitableNodeBin(minMajor: number, minMinor: number): string 
 
   // nvm: ~/.nvm/versions/node/v20.10.0/bin/
   const nvmDir = process.env.NVM_DIR || path.join(homeDir, '.nvm');
-  searchPaths.push({ base: path.join(nvmDir, 'versions', 'node'), binSuffix: 'bin' });
+  searchPaths.push({
+    base: path.join(nvmDir, 'versions', 'node'),
+    binSuffix: 'bin',
+  });
 
   // fnm (macOS): ~/Library/Application Support/fnm/node-versions/v20.10.0/installation/bin/
   // fnm (Linux): ~/.local/share/fnm/node-versions/v20.10.0/installation/bin/
@@ -263,9 +462,17 @@ export function findSuitableNodeBin(minMajor: number, minMinor: number): string 
   }
 
   // volta: ~/.volta/tools/image/node/20.10.0/bin/
-  searchPaths.push({ base: path.join(homeDir, '.volta', 'tools', 'image', 'node'), binSuffix: 'bin' });
+  searchPaths.push({
+    base: path.join(homeDir, '.volta', 'tools', 'image', 'node'),
+    binSuffix: 'bin',
+  });
 
-  const candidates: Array<{ major: number; minor: number; patch: number; binDir: string }> = [];
+  const candidates: Array<{
+    major: number;
+    minor: number;
+    patch: number;
+    binDir: string;
+  }> = [];
 
   for (const { base, binSuffix } of searchPaths) {
     try {
@@ -332,6 +539,13 @@ function parseEnvOutput(output: string): Record<string, string> {
   return result;
 }
 
+export function getWindowsShellExecutionOptions(): {
+  shell?: boolean;
+  windowsHide?: boolean;
+} {
+  return process.platform === 'win32' ? { shell: true, windowsHide: true } : {};
+}
+
 /**
  * Resolve a modern npx binary (npm >= 7) from the same directory as the
  * active node binary.  Old standalone npx packages (npm v5/v6 era) don't
@@ -351,17 +565,40 @@ export function resolveNpxPath(env: Record<string, string | undefined>): string 
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...getWindowsShellExecutionOptions(),
     })
       .trim()
-      .split('\n')[0]; // `where` on Windows may return multiple lines
+      .split(/\r?\n/)[0]; // `where` on Windows may return multiple lines
     const npxCandidate = path.join(path.dirname(nodePath), npxName);
-    // Verify the candidate exists AND is modern (npm >= 7 bundles npx >= 7)
-    const versionOutput = execFileSync(npxCandidate, ['--version'], {
-      env,
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+
+    let versionOutput = '';
+    if (isWindows) {
+      // Packaged Windows builds may resolve a bundled node.exe whose sibling
+      // npx.cmd exists, but its bundled npm JS files are missing. Probe the
+      // npm entrypoint JS directly so we only trust a complete Node+npm install.
+      const npmBinDir = path.join(path.dirname(nodePath), 'node_modules', 'npm', 'bin');
+      const npmPrefixJs = path.join(npmBinDir, 'npm-prefix.js');
+      const npxCliJs = path.join(npmBinDir, 'npx-cli.js');
+      if (!existsSync(npxCandidate) || !existsSync(npmPrefixJs) || !existsSync(npxCliJs)) {
+        throw new Error('Node-adjacent npx.cmd or bundled npm scripts are missing');
+      }
+      versionOutput = execFileSync(nodePath, [npxCliJs, '--version'], {
+        env,
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      }).trim();
+    } else {
+      // Verify the candidate exists AND is modern (npm >= 7 bundles npx >= 7)
+      versionOutput = execFileSync(npxCandidate, ['--version'], {
+        env,
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+    }
+
     const majorVersion = parseInt(versionOutput.split('.')[0], 10);
     if (majorVersion >= 7) {
       return npxCandidate;
@@ -373,38 +610,144 @@ export function resolveNpxPath(env: Record<string, string | undefined>): string 
   return npxName;
 }
 
-/** Separate cache for full (unfiltered) shell environment */
-let cachedFullShellEnv: Record<string, string> | null = null;
+/**
+ * Promise-based dedup guard so concurrent callers share one spawn.
+ * Without this, a second caller arriving before the first await resolves
+ * would see cachedFullShellEnv as {} and return an empty env.
+ */
+let fullShellEnvPromise: Promise<Record<string, string>> | null = null;
 
 /**
  * Load ALL environment variables from user's login shell (no whitelist).
  * Used by agents (e.g. Codex) that need the complete shell env.
- * Shares the same shell invocation approach as loadShellEnvironment()
- * but caches separately and does not filter.
+ *
+ * Uses `-i -l` (interactive login) so that `.zshrc` / `.bashrc` are loaded,
+ * which is where most users export custom env vars (e.g. API keys).
+ * The child is spawned with `detached: true` to create a new session
+ * (setsid), preventing zsh's `tcsetpgrp()` from hijacking the parent's
+ * terminal foreground process group — the root cause of the Ctrl+C
+ * regression fixed in 0039b295.
  */
-export function loadFullShellEnvironment(): Record<string, string> {
-  if (cachedFullShellEnv !== null) return cachedFullShellEnv;
-  cachedFullShellEnv = {};
-  if (process.platform === 'win32') return cachedFullShellEnv;
+export function loadFullShellEnvironment(): Promise<Record<string, string>> {
+  if (!fullShellEnvPromise) {
+    fullShellEnvPromise = loadFullShellEnvironmentImpl();
+  }
+  return fullShellEnvPromise;
+}
+
+async function loadFullShellEnvironmentImpl(): Promise<Record<string, string>> {
+  if (process.platform === 'win32') return {};
+
+  const shell = resolveLoginShell();
+  if (!path.isAbsolute(shell)) return {};
 
   try {
-    const shell = process.env.SHELL || '/bin/bash';
-    if (!path.isAbsolute(shell)) return cachedFullShellEnv;
+    const output = await new Promise<string>((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      // detached: true → child runs in a new session (setsid on POSIX).
+      // Interactive zsh calls tcsetpgrp() to grab the foreground process
+      // group, but in a detached session it has no controlling terminal,
+      // so the call is harmless and Ctrl+C in the parent is unaffected.
+      const child = spawn(shell, ['-i', '-l', '-c', 'env'], {
+        detached: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, HOME: os.homedir() },
+      });
+      child.unref();
 
-    const output = execFileSync(shell, ['-i', '-l', '-c', 'env'], {
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: os.homedir() },
+      child.stdout!.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr!.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', reject);
+
+      // Safety timeout — don't hang forever if the shell stalls
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          // best-effort
+        }
+        reject(new Error('Timed out loading full shell environment'));
+      }, 5000);
+
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          resolve(stdout);
+        } else {
+          reject(new Error(`Shell exited with code ${code}: ${stderr.substring(0, 200)}`));
+        }
+      });
     });
 
-    cachedFullShellEnv = parseEnvOutput(output);
-    const varCount = Object.keys(cachedFullShellEnv).length;
-    const shellPath = cachedFullShellEnv.PATH || '(empty)';
+    const result = parseEnvOutput(output);
+    const varCount = Object.keys(result).length;
+    const shellPath = result.PATH || '(empty)';
     console.log(`[ShellEnv] Full shell env loaded: ${varCount} vars, shell=${shell}`);
     console.log(`[ShellEnv] Shell PATH (first 200 chars): ${shellPath.substring(0, 200)}`);
+    return result;
   } catch (error) {
     console.warn('[ShellEnv] Failed to load full shell env:', error instanceof Error ? error.message : String(error));
+    return {};
   }
-  return cachedFullShellEnv;
+}
+
+/**
+ * Log a one-time environment diagnostics snapshot.
+ * Called once at app startup; output goes to electron-log file via console,
+ * so users can share the log file for debugging (#1157).
+ */
+export function logEnvironmentDiagnostics(): void {
+  const isWindows = process.platform === 'win32';
+  const tag = '[ShellEnv-Diag]';
+
+  console.log(`${tag} platform=${process.platform}, arch=${process.arch}, node=${process.version}`);
+  console.log(`${tag} process.env.PATH (first 300): ${(process.env.PATH || '(empty)').substring(0, 300)}`);
+
+  if (!isWindows) return;
+
+  // Windows-specific diagnostics for cygpath / Git / tool discovery
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+  const gitUsrBin = path.join(programFiles, 'Git', 'usr', 'bin');
+  const cygpathPath = path.join(gitUsrBin, 'cygpath.exe');
+
+  console.log(`${tag} APPDATA=${process.env.APPDATA || '(unset)'}`);
+  console.log(`${tag} LOCALAPPDATA=${process.env.LOCALAPPDATA || '(unset)'}`);
+  console.log(`${tag} ProgramFiles=${programFiles}`);
+  console.log(`${tag} Git usr/bin dir: ${existsSync(gitUsrBin) ? 'EXISTS' : 'MISSING'} (${gitUsrBin})`);
+  console.log(`${tag} cygpath.exe: ${existsSync(cygpathPath) ? 'EXISTS' : 'MISSING'} (${cygpathPath})`);
+
+  // Report which extra paths will be appended
+  const enhanced = getEnhancedEnv();
+  console.log(`${tag} Enhanced PATH (first 500): ${enhanced.PATH.substring(0, 500)}`);
+}
+
+/**
+ * Return the platform-specific path to the npm _npx cache directory.
+ *
+ * - Windows: %LOCALAPPDATA%\npm-cache\_npx
+ * - POSIX:   ~/.npm/_npx
+ */
+export function getNpxCacheDir(): string {
+  const explicitCacheDir = process.env.npm_config_cache || process.env.NPM_CONFIG_CACHE;
+  if (explicitCacheDir) {
+    return path.join(explicitCacheDir, '_npx');
+  }
+
+  if (process.platform === 'win32') {
+    const npmCacheBase = path.join(
+      process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
+      'npm-cache'
+    );
+    return path.join(npmCacheBase, '_npx');
+  }
+
+  const homeDir = os.homedir();
+  const posixCacheCandidates = [path.join(homeDir, '.npm-cache'), path.join(homeDir, '.npm')];
+  const npmCacheBase = posixCacheCandidates.find((candidate) => existsSync(candidate)) || posixCacheCandidates[0];
+  return path.join(npmCacheBase, '_npx');
 }

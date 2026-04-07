@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from '@jest/globals';
-import type { IMessageToolGroup, TMessage } from '../../src/common/chatLib';
-import { composeMessage } from '../../src/common/chatLib';
+import { describe, expect, it } from 'vitest';
+import type { IMessageToolGroup, TMessage } from '../../src/common/chat/chatLib';
+import { composeMessage } from '../../src/common/chat/chatLib';
 
 describe('composeMessage tool_group immutability', () => {
   it('should not mutate the existing list and should return new references for tool_group updates', () => {

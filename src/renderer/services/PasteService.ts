@@ -6,7 +6,37 @@
 
 import { ipcBridge } from '@/common';
 import type { FileMetadata } from './FileService';
-import { getFileExtension } from './FileService';
+import { getFileExtension, uploadFileViaHttp, MAX_UPLOAD_SIZE_MB } from './FileService';
+import { isElectronDesktop } from '@/renderer/utils/platform';
+
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+/**
+ * Create a temporary file in a platform-aware way.
+ * Electron desktop uses IPC, WebUI uses HTTP API.
+ */
+async function createTempFile(
+  fileName: string,
+  data: Uint8Array,
+  contentType: string,
+  conversationId?: string
+): Promise<string | null> {
+  if (data.byteLength > MAX_UPLOAD_SIZE_BYTES) {
+    throw new Error('FILE_TOO_LARGE');
+  }
+  if (isElectronDesktop()) {
+    const tempPath = await ipcBridge.fs.createTempFile.invoke({ fileName });
+    if (tempPath) {
+      await ipcBridge.fs.writeFile.invoke({ path: tempPath, data });
+    }
+    return tempPath;
+  }
+  // WebUI: upload via HTTP multipart
+  const arrayBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  const blob = new Blob([arrayBuf], { type: contentType });
+  const file = new File([blob], fileName, { type: contentType });
+  return uploadFileViaHttp(file, conversationId || '');
+}
 
 type PasteHandler = (event: React.ClipboardEvent | ClipboardEvent) => Promise<boolean>;
 
@@ -98,7 +128,13 @@ class PasteServiceClass {
   }
 
   // 通用粘贴处理逻辑
-  async handlePaste(event: React.ClipboardEvent | ClipboardEvent, supportedExts: string[], onFilesAdded: (files: FileMetadata[]) => void, onTextPaste?: (text: string) => void): Promise<boolean> {
+  async handlePaste(
+    event: React.ClipboardEvent | ClipboardEvent,
+    supportedExts: string[],
+    onFilesAdded: (files: FileMetadata[]) => void,
+    onTextPaste?: (text: string) => void,
+    conversationId?: string
+  ): Promise<boolean> {
     // 立即事件冒泡,避免全局监听器重复处理
     event.stopPropagation();
     const clipboardText = event.clipboardData?.getData('text');
@@ -110,6 +146,7 @@ class PasteServiceClass {
     if (files && files.length > 0) {
       // 处理文件，跳过文本处理
       const fileList: FileMetadata[] = [];
+      const usedFileNames = new Set<string>();
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const filePath = (file as File & { path?: string }).path;
@@ -125,19 +162,28 @@ class PasteServiceClass {
               const arrayBuffer = await file.arrayBuffer();
               const uint8Array = new Uint8Array(arrayBuffer);
 
-              // 生成简洁的文件名，如果剪贴板图片有奇怪的默认名，替换为简洁名称
+              // Generate a concise filename; replace system-generated default names
               const now = new Date();
               const timeStr = `${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
 
-              // 如果文件名看起来像系统生成的（包含时间戳格式），使用我们的命名
               const isSystemGenerated = file.name && /^[a-zA-Z]?_?\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(file.name);
-              const fileName = file.name && !isSystemGenerated ? file.name : `pasted_image_${timeStr}${fileExt}`;
-
-              // 创建临时文件并写入数据
-              const tempPath = await ipcBridge.fs.createTempFile.invoke({ fileName });
-              if (tempPath) {
-                await ipcBridge.fs.writeFile.invoke({ path: tempPath, data: uint8Array });
+              let fileName = file.name && !isSystemGenerated ? file.name : `pasted_image_${timeStr}${fileExt}`;
+              // Ensure unique filename within the same paste batch to prevent
+              // collisions when multiple images are pasted simultaneously
+              if (usedFileNames.has(fileName)) {
+                const extIdx = fileName.lastIndexOf('.');
+                const baseName = extIdx > 0 ? fileName.slice(0, extIdx) : fileName;
+                const ext = extIdx > 0 ? fileName.slice(extIdx) : fileExt;
+                let counter = 2;
+                while (usedFileNames.has(`${baseName}_${counter}${ext}`)) {
+                  counter++;
+                }
+                fileName = `${baseName}_${counter}${ext}`;
               }
+              usedFileNames.add(fileName);
+
+              // 创建临时文件并写入数据（Electron 使用 IPC，WebUI 使用 HTTP API）
+              const tempPath = await createTempFile(fileName, uint8Array, file.type, conversationId);
 
               if (tempPath) {
                 fileList.push({
@@ -149,6 +195,9 @@ class PasteServiceClass {
                 });
               }
             } catch (error) {
+              if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+                throw error;
+              }
               console.error('创建临时文件失败:', error);
             }
           } else {
@@ -182,14 +231,27 @@ class PasteServiceClass {
               const arrayBuffer = await file.arrayBuffer();
               const uint8Array = new Uint8Array(arrayBuffer);
 
-              // 使用原文件名
-              const fileName = file.name;
+              // Ensure unique filename within the same paste batch
+              let fileName = file.name;
+              if (usedFileNames.has(fileName)) {
+                const extIdx = fileName.lastIndexOf('.');
+                const baseName = extIdx > 0 ? fileName.slice(0, extIdx) : fileName;
+                const ext = extIdx > 0 ? fileName.slice(extIdx) : fileExt;
+                let counter = 2;
+                while (usedFileNames.has(`${baseName}_${counter}${ext}`)) {
+                  counter++;
+                }
+                fileName = `${baseName}_${counter}${ext}`;
+              }
+              usedFileNames.add(fileName);
 
-              // 创建临时文件并写入数据
-              const tempPath = await ipcBridge.fs.createTempFile.invoke({ fileName });
+              const tempPath = await createTempFile(
+                fileName,
+                uint8Array,
+                file.type || 'application/octet-stream',
+                conversationId
+              );
               if (tempPath) {
-                await ipcBridge.fs.writeFile.invoke({ path: tempPath, data: uint8Array });
-
                 fileList.push({
                   name: fileName,
                   path: tempPath,
@@ -199,6 +261,9 @@ class PasteServiceClass {
                 });
               }
             } catch (error) {
+              if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+                throw error;
+              }
               console.error('创建临时文件失败:', error);
             }
           } else {

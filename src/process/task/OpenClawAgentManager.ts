@@ -4,17 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { OpenClawAgent, type OpenClawAgentConfig } from '@/agent/openclaw';
-import { channelEventBus } from '@/channels/agent/ChannelEventBus';
+import { OpenClawAgent, type OpenClawAgentConfig } from '@process/agent/openclaw';
+import { channelEventBus } from '@process/channels/agent/ChannelEventBus';
 import { ipcBridge } from '@/common';
-import type { IConfirmation, TMessage } from '@/common/chatLib';
-import { transformMessage } from '@/common/chatLib';
-import type { IResponseMessage } from '@/common/ipcBridge';
+import type { IConfirmation, TMessage } from '@/common/chat/chatLib';
+import { transformMessage } from '@/common/chat/chatLib';
+import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import { uuid } from '@/common/utils';
-import type { AcpBackendAll } from '@/types/acpTypes';
-import { addMessage, addOrUpdateMessage } from '@process/message';
+import type { AcpBackendAll } from '@/common/types/acpTypes';
+import { getDatabase } from '@process/services/database';
+import { addMessage, addOrUpdateMessage } from '@process/utils/message';
 import { cronBusyGuard } from '@process/services/cron/CronBusyGuard';
+import { skillSuggestWatcher } from '@process/services/cron/SkillSuggestWatcher';
 import BaseAgentManager from '@process/task/BaseAgentManager';
+import { IpcAgentEventEmitter } from '@process/task/IpcAgentEventEmitter';
+import { teamEventBus } from '@process/team/teamEventBus';
 
 export interface OpenClawAgentManagerData {
   conversation_id: string;
@@ -37,20 +41,22 @@ export interface OpenClawAgentManagerData {
 }
 
 class OpenClawAgentManager extends BaseAgentManager<OpenClawAgentManagerData> {
-  workspace?: string;
   agent!: OpenClawAgent;
   bootstrap: Promise<OpenClawAgent>;
   private isFirstMessage: boolean = true;
   private options: OpenClawAgentManagerData;
 
   constructor(data: OpenClawAgentManagerData) {
-    super('openclaw-gateway', data);
+    super('openclaw-gateway', data, new IpcAgentEventEmitter());
     this.conversation_id = data.conversation_id;
-    this.workspace = data.workspace;
+    this.workspace = data.workspace ?? '';
     this.options = data;
     this.status = 'pending';
 
     this.bootstrap = this.initAgent(data);
+    // Prevent unhandled promise rejection when gateway fails to start (e.g. binary not found).
+    // The error still propagates when sendMessage() awaits this.bootstrap.
+    this.bootstrap.catch(() => {});
   }
 
   private async initAgent(data: OpenClawAgentManagerData): Promise<OpenClawAgent> {
@@ -111,6 +117,8 @@ class OpenClawAgentManager extends BaseAgentManager<OpenClawAgentManagerData> {
     ipcBridge.openclawConversation.responseStream.emit(msg);
     // Also emit to the unified conversation stream so the generic chat UI can render OpenClaw replies.
     ipcBridge.conversation.responseStream.emit(msg);
+    // Also emit to main-process-local bus so TeammateManager can receive events
+    teamEventBus.emit('responseStream', msg);
 
     // Emit to Channel global event bus (Telegram/Lark streaming)
     channelEventBus.emitAgentMessage(this.conversation_id, msg);
@@ -123,7 +131,12 @@ class OpenClawAgentManager extends BaseAgentManager<OpenClawAgentManagerData> {
     if (msg.type === 'acp_permission') {
       const permissionData = msg.data as {
         sessionId: string;
-        toolCall: { toolCallId: string; title?: string; kind?: string; rawInput?: Record<string, unknown> };
+        toolCall: {
+          toolCallId: string;
+          title?: string;
+          kind?: string;
+          rawInput?: Record<string, unknown>;
+        };
         options: Array<{ optionId: string; name: string; kind: string }>;
       };
 
@@ -146,31 +159,62 @@ class OpenClawAgentManager extends BaseAgentManager<OpenClawAgentManagerData> {
     // Handle finish event
     if (msg.type === 'finish') {
       cronBusyGuard.setProcessing(this.conversation_id, false);
+      skillSuggestWatcher.onFinish(this.conversation_id);
     }
 
     // Emit signal events to frontend
     ipcBridge.openclawConversation.responseStream.emit(msg);
     ipcBridge.conversation.responseStream.emit(msg);
+    // Also emit to main-process-local bus so TeammateManager can receive events
+    teamEventBus.emit('responseStream', msg);
 
     // Forward signals to Channel global event bus
     channelEventBus.emitAgentMessage(this.conversation_id, msg);
   }
 
   private handleSessionKeyUpdate(sessionKey: string): void {
-    // Store updated session key for resume
-    // This could be persisted to conversation extra data
-    console.log('[OpenClawAgentManager] Session key updated:', sessionKey);
+    this.saveSessionKey(sessionKey);
   }
 
-  async sendMessage(data: { content: string; files?: string[]; msg_id?: string }) {
+  /**
+   * Persist the resolved session key to the database for resume support.
+   * Follows the same pattern as AcpAgentManager.saveAcpSessionId().
+   */
+  private async saveSessionKey(sessionKey: string): Promise<void> {
+    try {
+      const db = await getDatabase();
+      const result = db.getConversation(this.conversation_id);
+      if (result.success && result.data && result.data.type === 'openclaw-gateway') {
+        const conversation = result.data;
+        const updatedExtra = {
+          ...conversation.extra,
+          sessionKey,
+        };
+        db.updateConversation(this.conversation_id, {
+          extra: updatedExtra,
+        } as Partial<typeof conversation>);
+      }
+    } catch (error) {
+      console.error('[OpenClawAgentManager] Failed to save session key:', error);
+    }
+  }
+
+  async sendMessage(data: {
+    content: string;
+    agentContent?: string;
+    files?: string[];
+    msg_id?: string;
+    hidden?: boolean;
+    silent?: boolean;
+  }) {
     cronBusyGuard.setProcessing(this.conversation_id, true);
     // Set status to running when message is being processed
     this.status = 'running';
     try {
       await this.bootstrap;
 
-      // Save user message to chat history
-      if (data.msg_id && data.content) {
+      // Save user message to chat history (always use original content, not injected version)
+      if (data.msg_id && data.content && !data.silent) {
         const userMessage: TMessage = {
           id: data.msg_id,
           msg_id: data.msg_id,
@@ -179,13 +223,14 @@ class OpenClawAgentManager extends BaseAgentManager<OpenClawAgentManagerData> {
           conversation_id: this.conversation_id,
           content: { content: data.content },
           createdAt: Date.now(),
+          ...(data.hidden && { hidden: true }),
         };
         addMessage(this.conversation_id, userMessage);
       }
 
-      // Send message to agent
+      // Send message to agent (use agentContent if provided, e.g. with injected skills)
       const result = await this.agent.sendMessage({
-        content: data.content,
+        content: data.agentContent || data.content,
         files: data.files,
         msg_id: data.msg_id,
       });

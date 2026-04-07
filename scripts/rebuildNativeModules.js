@@ -1,18 +1,55 @@
 /**
  * Unified native module rebuild utility
  * Handles rebuilding native modules for different platforms and architectures
+ *
+ * Supports vx toolchain management:
+ * - Uses 'vx --with msvc' on Windows to ensure MSVC compiler is available
+ * - Falls back to standard bunx if vx is not available
  */
 
-const { execSync, execFileSync } = require('child_process');
+const { execSync, execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 /**
- * Get npx command for the current platform
- * Windows requires npx.cmd, others use npx
+ * Check if vx is available in the system
  */
-function getNpxCommand() {
-  return process.platform === 'win32' ? 'npx.cmd' : 'npx';
+function isVxAvailable() {
+  try {
+    const result = spawnSync('vx', ['--version'], { stdio: 'ignore' });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get bunx command for the current platform
+ * Windows requires bunx.cmd, others use bunx
+ * Note: does NOT add 'vx' prefix here — the caller's cmdPrefix (e.g. 'vx --with msvc')
+ * already provides the vx entry point, so we must not nest another 'vx' call.
+ */
+function getBunxCommand() {
+  return process.platform === 'win32' ? 'bun x' : 'bun x';
+}
+
+/**
+ * Get command prefix for native compilation with proper toolchain.
+ * On Windows, returns 'vx --with msvc' so MSVC env vars are injected into
+ * the subprocess environment before bunx/node-gyp runs.
+ * On other platforms returns 'vx' to ensure the correct bun version is used.
+ * Returns '' when vx is not available.
+ */
+function getCommandPrefix(platform, useVx = true) {
+  if (!useVx || !isVxAvailable()) {
+    return '';
+  }
+  if (platform === 'win32' || platform === 'windows') {
+    // 'vx --with msvc <cmd>' injects VCINSTALLDIR and related env vars so
+    // node-gyp can locate the MSVC compiler without a separate choco install.
+    return 'vx --with msvc';
+  }
+  return 'vx';
 }
 
 /**
@@ -20,10 +57,10 @@ function getNpxCommand() {
  */
 function normalizeArch(arch) {
   const archMap = {
-    'x64': 'x64',
-    'arm64': 'arm64',
-    'ia32': 'ia32',
-    'armv7l': 'arm',
+    x64: 'x64',
+    arm64: 'arm64',
+    ia32: 'ia32',
+    armv7l: 'arm',
   };
   return archMap[arch] || arch;
 }
@@ -91,8 +128,8 @@ function rebuildWithElectronRebuild(options) {
   const targetArch = normalizeArch(arch);
   const env = buildEnvironment(platform, targetArch, electronVersion);
 
-  const npxCmd = getNpxCommand();
-  const rebuildCmd = `${npxCmd} electron-rebuild --only ${modules.join(',')} --force --arch ${targetArch} --electron-version ${electronVersion}`;
+  const bunxCmd = getBunxCommand();
+  const rebuildCmd = `${bunxCmd} electron-rebuild --only ${modules.join(',')} --force --arch ${targetArch} --electron-version ${electronVersion}`;
 
   execSync(rebuildCmd, {
     stdio: 'inherit',
@@ -154,7 +191,9 @@ function rebuildSingleModule(options) {
   env.npm_config_platform = platform;
   env.npm_config_target_platform = platform;
 
-  const npxCmd = getNpxCommand();
+  const bunxCmd = getBunxCommand();
+  const cmdPrefix = getCommandPrefix(platform);
+  const useShell = cmdPrefix.length > 0; // Need shell for vx prefix
 
   // For Linux cross-compilation, ALWAYS use prebuild-install
   // because electron-rebuild cannot cross-compile without ARM64 toolchain
@@ -206,14 +245,26 @@ function rebuildSingleModule(options) {
         '--force',
       ];
 
-      console.log(`     Running: ${npxCmd} ${prebuildArgs.join(' ')}`);
+      const fullCmd = cmdPrefix
+        ? `${cmdPrefix} ${bunxCmd} ${prebuildArgs.join(' ')}`
+        : `${bunxCmd} ${prebuildArgs.join(' ')}`;
+      console.log(`     Running: ${fullCmd}`);
 
-      execFileSync(npxCmd, prebuildArgs, {
-        cwd: moduleRoot,
-        env,
-        stdio: 'inherit', // Show output for debugging
-        shell: true,
-      });
+      if (useShell) {
+        execSync(fullCmd, {
+          cwd: moduleRoot,
+          env,
+          stdio: 'inherit',
+          shell: true,
+        });
+      } else {
+        execFileSync(bunxCmd, prebuildArgs, {
+          cwd: moduleRoot,
+          env,
+          stdio: 'inherit',
+          shell: true,
+        });
+      }
 
       console.log(`     ✓ prebuild-install succeeded`);
       return true;
@@ -237,24 +288,36 @@ function rebuildSingleModule(options) {
 
   try {
     env.npm_config_build_from_source = 'true';
-    execFileSync(
-      npxCmd,
-      [
-        '--yes',
-        'electron-rebuild',
-        '--only',
-        moduleName,
-        '--force',
-        `--platform=${platform}`,
-        `--arch=${targetArch}`,
-      ],
-      {
+    const rebuildArgs = [
+      '--yes',
+      'electron-rebuild',
+      '--only',
+      moduleName,
+      '--force',
+      `--platform=${platform}`,
+      `--arch=${targetArch}`,
+    ];
+
+    const fullCmd = cmdPrefix
+      ? `${cmdPrefix} ${bunxCmd} ${rebuildArgs.join(' ')}`
+      : `${bunxCmd} ${rebuildArgs.join(' ')}`;
+    console.log(`     Running: ${fullCmd}`);
+
+    if (useShell) {
+      execSync(fullCmd, {
         cwd: projectRoot,
         env,
         stdio: 'inherit',
         shell: true,
-      }
-    );
+      });
+    } else {
+      execFileSync(bunxCmd, rebuildArgs, {
+        cwd: projectRoot,
+        env,
+        stdio: 'inherit',
+        shell: true,
+      });
+    }
     return true;
   } catch (error) {
     console.error(`❌ Failed to rebuild ${moduleName}:`, error.message);
@@ -293,9 +356,7 @@ function findNodeFiles(dir, maxDepth = 3, currentDepth = 0) {
  */
 function verifyModuleBinary(moduleRoot, moduleName) {
   const binaryPathsToCheck = {
-    'better-sqlite3': [
-      path.join(moduleRoot, 'build', 'Release', 'better_sqlite3.node'),
-    ],
+    'better-sqlite3': [path.join(moduleRoot, 'build', 'Release', 'better_sqlite3.node')],
     'node-pty': [
       path.join(moduleRoot, 'build', 'Release', 'pty.node'),
       path.join(moduleRoot, 'build', 'Release', 'conpty.node'),
@@ -318,7 +379,7 @@ function verifyModuleBinary(moduleRoot, moduleName) {
   const foundFiles = findNodeFiles(moduleRoot);
   if (foundFiles.length > 0) {
     console.log(`     Debug: Found .node files:`);
-    foundFiles.forEach(f => console.log(`       - ${f}`));
+    foundFiles.forEach((f) => console.log(`       - ${f}`));
     return true;
   }
 
@@ -334,4 +395,7 @@ module.exports = {
   rebuildSingleModule,
   verifyModuleBinary,
   canCrossCompileFromSource,
+  isVxAvailable,
+  getBunxCommand,
+  getCommandPrefix,
 };

@@ -4,74 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AIONUI_TIMESTAMP_SEPARATOR } from '@/common/constants';
+import { AIONUI_TIMESTAMP_SEPARATOR } from '@/common/config/constants';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import https from 'node:https';
 import http from 'node:http';
-import { app } from 'electron';
 import JSZip from 'jszip';
-import { ipcBridge } from '../../common';
-import { getSystemDir, getAssistantsDir } from '../initStorage';
-import { readDirectoryRecursive } from '../utils';
+import { ipcBridge } from '@/common';
+import { getSystemDir, getAssistantsDir, getSkillsDir, getBuiltinSkillsCopyDir } from '@process/utils/initStorage';
+import { readDirectoryRecursive } from '@process/utils';
 
 // ============================================================================
 // Helper functions for builtin resource directory resolution
 // 内置资源目录解析辅助函数
 // ============================================================================
 
-type ResourceType = 'rules' | 'skills';
+type ResourceType = 'rules' | 'skills' | 'assistant';
 
 /**
- * Find the builtin resource directory (rules or skills)
- * 查找内置资源目录（rules 或 skills）
- *
- * When packaged, resources are in asarUnpack, so they're at app.asar.unpacked/
- * 打包后，资源在 asarUnpack 中，所以在 app.asar.unpacked/ 目录下
+ * Resolve builtin resource directory without Electron.
+ * In development and standalone server mode: searches relative to process.cwd().
+ * Returns first existing candidate, falling back to first candidate path.
  */
-async function findBuiltinResourceDir(resourceType: ResourceType): Promise<string> {
-  if (app.isPackaged) {
-    const appPath = app.getAppPath();
-    // asarUnpack extracts files to app.asar.unpacked directory
-    // asarUnpack 会将文件解压到 app.asar.unpacked 目录
-    const unpackedPath = appPath.replace('app.asar', 'app.asar.unpacked');
-    const candidates = [
-      path.join(unpackedPath, resourceType), // Unpacked location (preferred)
-      path.join(appPath, resourceType), // Fallback to asar path
-    ];
-    for (const candidate of candidates) {
-      try {
-        await fs.access(candidate);
-        return candidate;
-      } catch {
-        // Try next path
-      }
-    }
-    console.warn(`[fsBridge] Could not find builtin ${resourceType} directory, tried:`, candidates);
-    return candidates[0]; // Default to unpacked path
-  }
-  // Development: try multiple paths
-  const appPath = app.getAppPath();
-  const candidates = [path.join(appPath, resourceType), path.join(appPath, '..', resourceType), path.join(appPath, '..', '..', resourceType), path.join(appPath, '..', '..', '..', resourceType)];
+/**
+ * Resolve builtin resource directory without Electron.
+ * In development and standalone server mode: searches relative to process.cwd().
+ * Returns first existing candidate, falling back to first candidate path.
+ */
+async function findBuiltinResourceDirNode(resourceType: ResourceType): Promise<string> {
+  const base = process.cwd();
+  const devDir =
+    resourceType === 'skills' || resourceType === 'assistant' ? `src/process/resources/${resourceType}` : resourceType;
+  const candidates = [path.join(base, devDir), path.join(base, '..', devDir), path.join(base, resourceType)];
   for (const candidate of candidates) {
     try {
       await fs.access(candidate);
       return candidate;
     } catch {
-      // Try next path
+      // Try next
     }
   }
-  return candidates[0]; // Default fallback
-}
-
-/**
- * Get user config skills directory
- * 获取用户配置 skills 目录
- */
-function getUserSkillsDir(): string {
-  const userDataPath = app.getPath('userData');
-  return path.join(userDataPath, 'config', 'skills');
+  return candidates[0];
 }
 
 /**
@@ -103,7 +77,7 @@ async function readBuiltinResource(resourceType: ResourceType, fileName: string)
   if (!safeFileName.endsWith('.md')) {
     throw new Error('Only .md files are allowed');
   }
-  const dir = await findBuiltinResourceDir(resourceType);
+  const dir = await findBuiltinResourceDirNode(resourceType);
   return fs.readFile(path.join(dir, safeFileName), 'utf-8');
 }
 
@@ -111,7 +85,12 @@ async function readBuiltinResource(resourceType: ResourceType, fileName: string)
  * Read assistant resource file with locale fallback
  * 读取助手资源文件，支持语言回退
  */
-async function readAssistantResource(resourceType: ResourceType, assistantId: string, locale: string, fileNamePattern: (id: string, loc: string) => string): Promise<string> {
+async function readAssistantResource(
+  resourceType: ResourceType,
+  assistantId: string,
+  locale: string,
+  fileNamePattern: (id: string, loc: string) => string
+): Promise<string> {
   const assistantsDir = getAssistantsDir();
   const locales = [locale, 'en-US', 'zh-CN'].filter((l, i, arr) => arr.indexOf(l) === i);
 
@@ -126,7 +105,7 @@ async function readAssistantResource(resourceType: ResourceType, assistantId: st
   }
 
   // 2. Fallback to builtin directory
-  const builtinDir = await findBuiltinResourceDir(resourceType);
+  const builtinDir = await findBuiltinResourceDirNode(resourceType);
   for (const loc of locales) {
     const fileName = fileNamePattern(assistantId, loc);
     try {
@@ -145,7 +124,13 @@ async function readAssistantResource(resourceType: ResourceType, assistantId: st
  * Write assistant resource file to user directory
  * 写入助手资源文件到用户目录
  */
-async function writeAssistantResource(resourceType: ResourceType, assistantId: string, content: string, locale: string, fileNamePattern: (id: string, loc: string) => string): Promise<boolean> {
+async function writeAssistantResource(
+  resourceType: ResourceType,
+  assistantId: string,
+  content: string,
+  locale: string,
+  fileNamePattern: (id: string, loc: string) => string
+): Promise<boolean> {
   try {
     const assistantsDir = getAssistantsDir();
     await fs.mkdir(assistantsDir, { recursive: true });
@@ -188,8 +173,13 @@ export function initFsBridge(): void {
   const canceledZipRequests = new Set<string>();
 
   ipcBridge.fs.getFilesByDir.provider(async ({ dir }) => {
-    const tree = await readDirectoryRecursive(dir);
-    return tree ? [tree] : [];
+    try {
+      const tree = await readDirectoryRecursive(dir);
+      return tree ? [tree] : [];
+    } catch (error) {
+      console.error('[fsBridge] Failed to read directory:', dir, error);
+      return [];
+    }
   });
 
   ipcBridge.fs.getImageBase64.provider(async ({ path: filePath }) => {
@@ -218,18 +208,23 @@ export function initFsBridge(): void {
   });
 
   // 下载远程图片并限制协议/重定向次数 / Download remote resource with protocol & redirect guard
-  const downloadRemoteBuffer = (targetUrl: string, redirectCount = 0): Promise<{ buffer: Buffer; contentType?: string }> => {
+  const downloadRemoteBuffer = (
+    targetUrl: string,
+    redirectCount = 0
+  ): Promise<{ buffer: Buffer; contentType?: string }> => {
     const allowedProtocols = new Set(['http:', 'https:']);
     const parsedUrl = new URL(targetUrl);
     if (!allowedProtocols.has(parsedUrl.protocol)) {
-      return Promise.reject(new Error('Unsupported protocol'));
+      throw new Error('Unsupported protocol');
     }
 
     // 仅允许白名单域名，避免随意访问 / Restrict to a whitelist of hosts for safety
     const allowedHosts = ['github.com', 'raw.githubusercontent.com', 'contrib.rocks', 'img.shields.io'];
-    const isAllowedHost = allowedHosts.some((host) => parsedUrl.hostname === host || parsedUrl.hostname.endsWith(`.${host}`));
+    const isAllowedHost = allowedHosts.some(
+      (host) => parsedUrl.hostname === host || parsedUrl.hostname.endsWith(`.${host}`)
+    );
     if (!isAllowedHost) {
-      return Promise.reject(new Error('URL not allowed for remote fetch'));
+      throw new Error('URL not allowed for remote fetch');
     }
 
     return new Promise((resolve, reject) => {
@@ -273,7 +268,10 @@ export function initFsBridge(): void {
             });
 
             response.on('end', () => {
-              resolve({ buffer: Buffer.concat(chunks), contentType: headers['content-type'] });
+              resolve({
+                buffer: Buffer.concat(chunks),
+                contentType: headers['content-type'],
+              });
             });
             response.on('error', (error) => reject(error));
           }
@@ -292,9 +290,14 @@ export function initFsBridge(): void {
 
   // 通过桥接层拉取远程图片并转成 base64 / Fetch remote image via bridge and return base64
   ipcBridge.fs.fetchRemoteImage.provider(async ({ url }) => {
-    const { buffer, contentType } = await downloadRemoteBuffer(url);
-    const base64 = buffer.toString('base64');
-    return `data:${contentType || 'application/octet-stream'};base64,${base64}`;
+    try {
+      const { buffer, contentType } = await downloadRemoteBuffer(url);
+      const base64 = buffer.toString('base64');
+      return `data:${contentType || 'application/octet-stream'};base64,${base64}`;
+    } catch (error) {
+      console.warn('[fsBridge] Failed to fetch remote image:', (error as Error).message);
+      return '';
+    }
   });
 
   // 创建临时文件 / Create temporary file on disk
@@ -335,11 +338,24 @@ export function initFsBridge(): void {
   });
 
   // 读取文件内容（UTF-8编码）/ Read file content (UTF-8 encoding)
+  // V8 string length limit is ~512MB; guard against RangeError on oversized files
+  const MAX_READ_FILE_SIZE = 256 * 1024 * 1024; // 256 MB
+
   ipcBridge.fs.readFile.provider(async ({ path: filePath }) => {
     try {
+      const stat = await fs.stat(filePath);
+      if (stat.size > MAX_READ_FILE_SIZE) {
+        console.warn(`[fsBridge] File too large to read as text (${stat.size} bytes): ${filePath}`);
+        return null;
+      }
       const content = await fs.readFile(filePath, 'utf-8');
       return content;
     } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Return null for missing or locked files (e.g., cleaned-up temp workspaces, Windows file locks)
+      if (code === 'ENOENT' || code === 'EBUSY') {
+        return null;
+      }
       console.error('Failed to read file:', error);
       throw error;
     }
@@ -353,6 +369,10 @@ export function initFsBridge(): void {
       // Convert Node.js Buffer to ArrayBuffer
       return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EBUSY') {
+        return null;
+      }
       console.error('Failed to read file buffer:', error);
       throw error;
     }
@@ -469,7 +489,9 @@ export function initFsBridge(): void {
               if (isCanceled()) {
                 abortController.abort();
               }
-              const fileBuffer = await fs.readFile(file.sourcePath, { signal: abortController.signal });
+              const fileBuffer = await fs.readFile(file.sourcePath, {
+                signal: abortController.signal,
+              });
               if (isCanceled()) {
                 throw new Error('Zip export canceled');
               }
@@ -500,7 +522,7 @@ export function initFsBridge(): void {
           const isTypedArrayLike = keys.length > 0 && keys.every((key) => /^\d+$/.test(key));
           if (isTypedArrayLike) {
             const values = keys
-              .sort((a, b) => Number(a) - Number(b))
+              .toSorted((a, b) => Number(a) - Number(b))
               .map((key) => {
                 const value = objectLike[key];
                 return typeof value === 'number' ? value : Number(value ?? 0);
@@ -527,6 +549,8 @@ export function initFsBridge(): void {
       if (isCanceled()) {
         throw new Error('Zip export canceled');
       }
+      // Ensure parent directory exists before writing (may be deleted by OneDrive sync, etc.)
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, zipBuffer);
       return true;
     } catch (error) {
@@ -555,8 +579,16 @@ export function initFsBridge(): void {
         lastModified: stats.mtime.getTime(),
       };
     } catch (error) {
-      console.error('Failed to get file metadata:', error);
-      throw error;
+      // Return empty metadata instead of throwing to avoid unhandled rejection
+      // (bridge provider callbacks have no .catch handler)
+      console.error('[fsBridge] Failed to get file metadata:', filePath, error);
+      return {
+        name: path.basename(filePath),
+        path: filePath,
+        size: -1,
+        type: '',
+        lastModified: 0,
+      };
     }
   });
 
@@ -662,7 +694,10 @@ export function initFsBridge(): void {
       return { success: true };
     } catch (error) {
       console.error('Failed to remove entry:', error);
-      return { success: false, msg: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        msg: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   });
 
@@ -691,7 +726,10 @@ export function initFsBridge(): void {
       return { success: true, data: { newPath } };
     } catch (error) {
       console.error('Failed to rename entry:', error);
-      return { success: false, msg: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        msg: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   });
 
@@ -701,7 +739,7 @@ export function initFsBridge(): void {
       return await readBuiltinResource('rules', fileName);
     } catch (error) {
       console.error('Failed to read builtin rule:', error);
-      throw error;
+      return '';
     }
   });
 
@@ -711,7 +749,7 @@ export function initFsBridge(): void {
       return await readBuiltinResource('skills', fileName);
     } catch (error) {
       console.error('Failed to read builtin skill:', error);
-      throw error;
+      return '';
     }
   });
 
@@ -758,7 +796,12 @@ export function initFsBridge(): void {
   // 获取可用 skills 列表 / List available skills from both builtin and user directories
   ipcBridge.fs.listAvailableSkills.provider(async () => {
     try {
-      const skills: Array<{ name: string; description: string; location: string; isCustom: boolean }> = [];
+      const skills: Array<{
+        name: string;
+        description: string;
+        location: string;
+        isCustom: boolean;
+      }> = [];
 
       // 辅助函数：从目录读取 skills
       const readSkillsFromDir = async (skillsDir: string, isCustomDir: boolean) => {
@@ -767,7 +810,7 @@ export function initFsBridge(): void {
           const entries = await fs.readdir(skillsDir, { withFileTypes: true });
 
           for (const entry of entries) {
-            if (!entry.isDirectory()) continue;
+            if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 
             // 跳过内置 skills 目录（_builtin），这些 skills 自动注入，不需要用户选择
             // Skip builtin skills directory (_builtin), these are auto-injected, no user selection needed
@@ -801,37 +844,31 @@ export function initFsBridge(): void {
         }
       };
 
-      // 读取内置 skills (isCustom: false)
-      const builtinSkillsDir = await findBuiltinResourceDir('skills');
+      // Read builtin skills from the dedicated builtin-skills/ directory (isCustom: false)
+      const builtinSkillsDir = getBuiltinSkillsCopyDir();
       const builtinCountBefore = skills.length;
       await readSkillsFromDir(builtinSkillsDir, false);
       const builtinCount = skills.length - builtinCountBefore;
 
       // 读取用户自定义 skills (isCustom: true)
-      const userSkillsDir = getUserSkillsDir();
+      const userSkillsDir = getSkillsDir();
       const userCountBefore = skills.length;
       await readSkillsFromDir(userSkillsDir, true);
       const userCount = skills.length - userCountBefore;
 
-      // 去重：如果 custom skill 和 builtin skill 同名，只保留 builtin
-      // Deduplicate: if custom and builtin skills have same name, keep only builtin
+      // Deduplicate: if a custom skill has the same name as a builtin, keep builtin
       const skillMap = new Map<string, { name: string; description: string; location: string; isCustom: boolean }>();
       for (const skill of skills) {
         const existing = skillMap.get(skill.name);
-        // 如果已存在且当前是 builtin，或者不存在，则添加/更新
-        // Add/update if: already exists and current is builtin, or doesn't exist yet
         if (!existing || !skill.isCustom) {
           skillMap.set(skill.name, skill);
         }
       }
-      const deduplicatedSkills = Array.from(skillMap.values());
+      const result = Array.from(skillMap.values());
 
-      console.log(`[fsBridge] Listed ${deduplicatedSkills.length} available skills (${skills.length} before deduplication):`);
-      console.log(`  - Builtin skills (${builtinCount}): ${builtinSkillsDir}`);
-      console.log(`  - User skills (${userCount}): ${userSkillsDir}`);
-      console.log(`  - Skills breakdown:`, deduplicatedSkills.map((s) => `${s.name} (${s.isCustom ? 'custom' : 'builtin'})`).join(', '));
+      console.log(`[fsBridge] Listed ${result.length} available skills: builtin=${builtinCount}, custom=${userCount}`);
 
-      return deduplicatedSkills;
+      return result;
     } catch (error) {
       console.error('[fsBridge] Failed to list available skills:', error);
       return [];
@@ -915,18 +952,21 @@ export function initFsBridge(): void {
       }
 
       // 获取用户 skills 目录 / Get user skills directory
-      const userSkillsDir = getUserSkillsDir();
+      const userSkillsDir = getSkillsDir();
       const targetDir = path.join(userSkillsDir, skillName);
 
-      // 检查是否已存在同名 skill（同时检查内置和用户目录）/ Check if skill already exists in both builtin and user directories
-      const builtinSkillsDir = await findBuiltinResourceDir('skills');
-      const builtinTargetDir = path.join(builtinSkillsDir, skillName);
+      // Check if skill already exists in both builtin and user directories
+      const builtinTargetDir = path.join(getBuiltinSkillsCopyDir(), skillName);
 
       try {
         await fs.access(targetDir);
+        // Skill already exists in user directory, treat as success (skip copy)
+        // 用户目录已存在同名 skill，视为成功（跳过复制）
+        console.log(`[fsBridge] Skill "${skillName}" already exists in user skills, skipping import`);
         return {
-          success: false,
-          msg: `Skill "${skillName}" already exists in user skills`,
+          success: true,
+          data: { skillName },
+          msg: `Skill "${skillName}" already exists`,
         };
       } catch {
         // User skill doesn't exist
@@ -972,7 +1012,7 @@ export function initFsBridge(): void {
       console.log(`[fsBridge] Found ${entries.length} entries in ${folderPath}`);
 
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
+        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 
         const skillDir = path.join(folderPath, entry.name);
         const skillMdPath = path.join(skillDir, 'SKILL.md');
@@ -1044,8 +1084,20 @@ export function initFsBridge(): void {
     try {
       const homedir = os.homedir();
       const candidates = [
-        { name: 'Gemini', path: path.join(homedir, '.gemini', 'skills') },
-        { name: 'Claude', path: path.join(homedir, '.claude', 'skills') },
+        {
+          name: 'Global Agents',
+          path: path.join(homedir, '.agents', 'skills'),
+        },
+        { name: 'Gemini CLI', path: path.join(homedir, '.gemini', 'skills') },
+        { name: 'Claude Code', path: path.join(homedir, '.claude', 'skills') },
+        {
+          name: 'OpenCode',
+          path: path.join(homedir, '.config', 'opencode', 'skills'),
+        },
+        {
+          name: 'OpenCode (Alt)',
+          path: path.join(homedir, '.opencode', 'skills'),
+        },
       ];
 
       const detected: Array<{ name: string; path: string }> = [];
@@ -1071,4 +1123,395 @@ export function initFsBridge(): void {
       };
     }
   });
+
+  // 检测外部 skills 并统计数量 / Detect external skills with counts
+  // ===== Custom external skill paths helpers =====
+  const getCustomExternalPathsFile = () => path.join(getSystemDir().workDir, 'custom_external_skill_paths.json');
+
+  const loadCustomExternalPaths = async (): Promise<Array<{ name: string; path: string }>> => {
+    try {
+      const filePath = getCustomExternalPathsFile();
+      const content = await fs.readFile(filePath, 'utf-8');
+      return JSON.parse(content) as Array<{ name: string; path: string }>;
+    } catch {
+      return [];
+    }
+  };
+
+  const saveCustomExternalPaths = async (paths: Array<{ name: string; path: string }>) => {
+    const filePath = getCustomExternalPathsFile();
+    await fs.writeFile(filePath, JSON.stringify(paths, null, 2), 'utf-8');
+  };
+
+  ipcBridge.fs.getCustomExternalPaths.provider(async () => {
+    return loadCustomExternalPaths();
+  });
+
+  ipcBridge.fs.addCustomExternalPath.provider(async ({ name, path: skillPath }) => {
+    try {
+      const existing = await loadCustomExternalPaths();
+      if (existing.some((p) => p.path === skillPath)) {
+        return { success: false, msg: 'Path already exists' };
+      }
+      existing.push({ name, path: skillPath });
+      await saveCustomExternalPaths(existing);
+      return { success: true, msg: 'Custom path added' };
+    } catch (error) {
+      return {
+        success: false,
+        msg: `Failed to add path: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+
+  ipcBridge.fs.removeCustomExternalPath.provider(async ({ path: skillPath }) => {
+    try {
+      const existing = await loadCustomExternalPaths();
+      const filtered = existing.filter((p) => p.path !== skillPath);
+      await saveCustomExternalPaths(filtered);
+      return { success: true, msg: 'Custom path removed' };
+    } catch (error) {
+      return {
+        success: false,
+        msg: `Failed to remove path: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+
+  ipcBridge.fs.detectAndCountExternalSkills.provider(async () => {
+    try {
+      const homedir = os.homedir();
+      const userSkillsDir = getSkillsDir();
+      const builtinCandidates = [
+        {
+          name: 'Global Agents',
+          path: path.join(homedir, '.agents', 'skills'),
+          source: 'global-agents',
+        },
+        {
+          name: 'Gemini CLI',
+          path: path.join(homedir, '.gemini', 'skills'),
+          source: 'gemini',
+        },
+        {
+          name: 'Claude Code',
+          path: path.join(homedir, '.claude', 'skills'),
+          source: 'claude',
+        },
+        {
+          name: 'OpenCode',
+          path: path.join(homedir, '.config', 'opencode', 'skills'),
+          source: 'opencode',
+        },
+        {
+          name: 'OpenCode (Alt)',
+          path: path.join(homedir, '.opencode', 'skills'),
+          source: 'opencode-alt',
+        },
+      ];
+
+      // Load custom paths and merge
+      const customPaths = await loadCustomExternalPaths();
+      const candidates = [
+        ...builtinCandidates,
+        ...customPaths.map((cp) => ({
+          name: cp.name,
+          path: cp.path,
+          source: `custom-${cp.path}`,
+        })),
+      ];
+
+      const results: Array<{
+        name: string;
+        path: string;
+        source: string;
+        skills: Array<{ name: string; description: string; path: string }>;
+      }> = [];
+
+      for (const candidate of candidates) {
+        try {
+          await fs.access(candidate.path);
+          const entries = await fs.readdir(candidate.path, {
+            withFileTypes: true,
+          });
+          const skills: Array<{
+            name: string;
+            description: string;
+            path: string;
+          }> = [];
+
+          for (const entry of entries) {
+            if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+            const skillDir = path.join(candidate.path, entry.name);
+
+            // Helper: try to parse a single skill directory with SKILL.md
+            const tryParseSkill = async (dir: string, fallbackName: string) => {
+              const skillMdPath = path.join(dir, 'SKILL.md');
+              try {
+                const content = await fs.readFile(skillMdPath, 'utf-8');
+                const frontMatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+                if (frontMatterMatch) {
+                  const yaml = frontMatterMatch[1];
+                  const nameMatch = yaml.match(/^name:\s*(.+)$/m);
+                  const descMatch = yaml.match(/^description:\s*['"]?(.+?)['"]?$/m);
+                  const skillName = nameMatch ? nameMatch[1].trim() : fallbackName;
+
+                  return {
+                    name: skillName,
+                    description: descMatch ? descMatch[1].trim() : '',
+                    path: dir,
+                  };
+                }
+              } catch {
+                // No SKILL.md or parse error
+              }
+              return null;
+            };
+
+            // Case 1: Direct skill — has SKILL.md at the root of the entry
+            const directSkill = await tryParseSkill(skillDir, entry.name);
+            if (directSkill) {
+              skills.push(directSkill);
+              continue;
+            }
+
+            // Case 2: Skill pack — entry has a nested skills/ subdirectory containing individual skills
+            const nestedSkillsDir = path.join(skillDir, 'skills');
+            try {
+              await fs.access(nestedSkillsDir);
+              const nestedEntries = await fs.readdir(nestedSkillsDir, {
+                withFileTypes: true,
+              });
+              for (const nestedEntry of nestedEntries) {
+                if (!nestedEntry.isDirectory() && !nestedEntry.isSymbolicLink()) continue;
+                const nestedDir = path.join(nestedSkillsDir, nestedEntry.name);
+                const nestedSkill = await tryParseSkill(nestedDir, nestedEntry.name);
+                if (nestedSkill) {
+                  skills.push(nestedSkill);
+                }
+              }
+            } catch {
+              // No nested skills/ dir
+            }
+          }
+
+          if (skills.length > 0) {
+            results.push({
+              name: candidate.name,
+              path: candidate.path,
+              source: candidate.source,
+              skills,
+            });
+          }
+        } catch {
+          // Path doesn't exist
+        }
+      }
+
+      return {
+        success: true,
+        data: results,
+        msg: `Found ${results.reduce((sum, r) => sum + r.skills.length, 0)} unimported external skills`,
+      };
+    } catch (error) {
+      console.error('[fsBridge] Failed to detect external skills:', error);
+      return {
+        success: false,
+        msg: 'Failed to detect external skills',
+      };
+    }
+  });
+
+  // 符号链接方式导入 skill / Import skill via symlink
+  ipcBridge.fs.importSkillWithSymlink.provider(async ({ skillPath }) => {
+    try {
+      const skillMdPath = path.join(skillPath, 'SKILL.md');
+      try {
+        await fs.access(skillMdPath);
+      } catch {
+        return {
+          success: false,
+          msg: 'SKILL.md file not found in the selected directory',
+        };
+      }
+
+      const content = await fs.readFile(skillMdPath, 'utf-8');
+      const frontMatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+      let skillName = path.basename(skillPath);
+      if (frontMatterMatch) {
+        const nameMatch = frontMatterMatch[1].match(/^name:\s*(.+)$/m);
+        if (nameMatch) skillName = nameMatch[1].trim();
+      }
+
+      const userSkillsDir = getSkillsDir();
+      const targetDir = path.join(userSkillsDir, skillName);
+
+      await fs.mkdir(userSkillsDir, { recursive: true });
+
+      try {
+        await fs.access(targetDir);
+        return { success: false, msg: `Skill "${skillName}" already exists` };
+      } catch {
+        // Does not exist, proceed
+      }
+
+      await fs.symlink(skillPath, targetDir, 'junction');
+      console.log(`[fsBridge] Created symlink for skill "${skillName}" at ${targetDir}`);
+      return {
+        success: true,
+        data: { skillName },
+        msg: `Skill "${skillName}" imported successfully`,
+      };
+    } catch (error) {
+      console.error('[fsBridge] Failed to import skill with symlink:', error);
+      return {
+        success: false,
+        msg: `Failed to import skill: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+
+  // 删除自定义 skill / Delete a user custom skill
+  ipcBridge.fs.deleteSkill.provider(async ({ skillName }) => {
+    try {
+      const userSkillsDir = getSkillsDir();
+      const skillDir = path.join(userSkillsDir, skillName);
+
+      const resolvedSkillDir = path.resolve(skillDir);
+      const resolvedSkillsDir = path.resolve(userSkillsDir);
+      if (!resolvedSkillDir.startsWith(resolvedSkillsDir + path.sep)) {
+        return {
+          success: false,
+          msg: 'Invalid skill path (security check failed)',
+        };
+      }
+
+      try {
+        await fs.access(resolvedSkillDir);
+      } catch {
+        return { success: false, msg: `Skill "${skillName}" not found` };
+      }
+
+      const stat = await fs.lstat(resolvedSkillDir);
+      if (stat.isSymbolicLink()) {
+        await fs.unlink(resolvedSkillDir);
+      } else {
+        await fs.rm(resolvedSkillDir, { recursive: true, force: true });
+      }
+
+      console.log(`[fsBridge] Deleted skill "${skillName}" from ${resolvedSkillDir}`);
+      return { success: true, msg: `Skill "${skillName}" deleted` };
+    } catch (error) {
+      console.error('[fsBridge] Failed to delete skill:', error);
+      return {
+        success: false,
+        msg: `Failed to delete skill: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+
+  // 获取技能存储路径 / Get skill storage paths
+  ipcBridge.fs.getSkillPaths.provider(async () => ({
+    userSkillsDir: getSkillsDir(),
+    builtinSkillsDir: getBuiltinSkillsCopyDir(),
+  }));
+
+  // 将 skill 同步导出到外部目录 / Export skill to external directory via symlink
+  ipcBridge.fs.exportSkillWithSymlink.provider(async ({ skillPath, targetDir }) => {
+    try {
+      const skillName = path.basename(skillPath);
+      const targetPath = path.join(targetDir, skillName);
+
+      // 确保目标基础目录存在 / Ensure target base directory exists
+      await fs.mkdir(targetDir, { recursive: true });
+
+      // 检查目标路径是否已存在 / Check if target path already exists
+      try {
+        await fs.access(targetPath);
+        return {
+          success: false,
+          msg: `Target already exists: ${targetPath}`,
+        };
+      } catch {
+        // Path does not exist, proceed
+      }
+
+      // 创建符号链接 / Create symlink
+      await fs.symlink(skillPath, targetPath, 'junction');
+      console.log(`[fsBridge] Exported skill "${skillName}" to ${targetPath} via symlink`);
+
+      return { success: true, msg: `Successfully exported to ${targetPath}` };
+    } catch (error) {
+      console.error('[fsBridge] Failed to export skill with symlink:', error);
+      return {
+        success: false,
+        msg: `Failed to export skill: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+
+  // Skills Market: inject the aionui-skills builtin skill
+  ipcBridge.fs.enableSkillsMarket.provider(async () => {
+    try {
+      const { getAutoSkillsDir } = await import('@process/utils/initStorage');
+      const skillDir = path.join(getAutoSkillsDir(), 'aionui-skills');
+      await fs.mkdir(skillDir, { recursive: true });
+
+      // Copy the bundled SKILL.md (concise entry-point version)
+      // The full 600+ line API doc is fetched by agents at runtime via curl
+      const content = await readBundledSkillsMarketMd();
+      await fs.writeFile(path.join(skillDir, 'SKILL.md'), content, 'utf-8');
+
+      // Reset AcpSkillManager singleton so it re-discovers builtin skills
+      const { AcpSkillManager } = await import('@process/task/AcpSkillManager');
+      AcpSkillManager.resetInstance();
+
+      return { success: true, msg: 'Skills Market skill enabled' };
+    } catch (error) {
+      console.error('[fsBridge] Failed to enable Skills Market:', error);
+      return {
+        success: false,
+        msg: `Failed to enable Skills Market: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+
+  // Skills Market: remove the aionui-skills builtin skill
+  ipcBridge.fs.disableSkillsMarket.provider(async () => {
+    try {
+      const { getAutoSkillsDir } = await import('@process/utils/initStorage');
+      const skillDir = path.join(getAutoSkillsDir(), 'aionui-skills');
+      await fs.rm(skillDir, { recursive: true, force: true });
+
+      // Reset AcpSkillManager singleton so it re-discovers builtin skills
+      const { AcpSkillManager } = await import('@process/task/AcpSkillManager');
+      AcpSkillManager.resetInstance();
+
+      return { success: true, msg: 'Skills Market skill disabled' };
+    } catch (error) {
+      console.error('[fsBridge] Failed to disable Skills Market:', error);
+      return {
+        success: false,
+        msg: `Failed to disable Skills Market: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+}
+
+/**
+ * Read the bundled SKILL.md for aionui-skills from app resources.
+ *
+ * This is a concise entry-point version (~30 lines) that tells agents
+ * to fetch the full API documentation via curl at runtime.
+ * The full 600+ line SKILL.md should NOT be injected via [LOAD_SKILL]
+ * as it would overwhelm the conversation context.
+ */
+async function readBundledSkillsMarketMd(): Promise<string> {
+  try {
+    const fallbackPath = path.join(getBuiltinSkillsCopyDir(), 'aionui-skills', 'SKILL.md');
+    return await fs.readFile(fallbackPath, 'utf-8');
+  } catch (error) {
+    console.warn('[fsBridge] Failed to read bundled aionui-skills SKILL.md:', error);
+    return `---\nname: aionui-skills\ndescription: "Access the AionUI Skills registry — discover and download AI agent skills."\n---\n\n# AionUI Skills Registry\n\nFetch full instructions:\n\n\`\`\`bash\nmkdir -p ~/.config/aionui-skills\ncurl -s https://skills.aionui.com/SKILL.md > ~/.config/aionui-skills/SKILL.md\n\`\`\`\n\nThen read and follow the instructions in that file.\n`;
+  }
 }

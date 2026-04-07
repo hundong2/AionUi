@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NanobotAgent, type NanobotAgentConfig } from '@/agent/nanobot';
+import { NanobotAgent, type NanobotAgentConfig } from '@process/agent/nanobot';
 import { ipcBridge } from '@/common';
-import type { TMessage } from '@/common/chatLib';
-import { transformMessage } from '@/common/chatLib';
-import type { IResponseMessage } from '@/common/ipcBridge';
+import type { TMessage } from '@/common/chat/chatLib';
+import { transformMessage } from '@/common/chat/chatLib';
+import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import { uuid } from '@/common/utils';
-import { addMessage, addOrUpdateMessage } from '@process/message';
+import { addMessage, addOrUpdateMessage } from '@process/utils/message';
 import { cronBusyGuard } from '@process/services/cron/CronBusyGuard';
+import { skillSuggestWatcher } from '@process/services/cron/SkillSuggestWatcher';
 import BaseAgentManager from '@process/task/BaseAgentManager';
+import { IpcAgentEventEmitter } from '@process/task/IpcAgentEventEmitter';
+import { teamEventBus } from '@process/team/teamEventBus';
 
 export interface NanoBotAgentManagerData {
   conversation_id: string;
@@ -24,16 +27,18 @@ export interface NanoBotAgentManagerData {
 }
 
 class NanoBotAgentManager extends BaseAgentManager<NanoBotAgentManagerData> {
-  workspace?: string;
   agent!: NanobotAgent;
   bootstrap: Promise<NanobotAgent>;
 
   constructor(data: NanoBotAgentManagerData) {
-    super('nanobot', data);
+    super('nanobot', data, new IpcAgentEventEmitter());
     this.conversation_id = data.conversation_id;
-    this.workspace = data.workspace;
+    this.workspace = data.workspace ?? '';
 
     this.bootstrap = this.initAgent(data);
+    // Prevent unhandled promise rejection when agent fails to start.
+    // The error still propagates when sendMessage() awaits this.bootstrap.
+    this.bootstrap.catch(() => {});
   }
 
   private async initAgent(data: NanoBotAgentManagerData): Promise<NanobotAgent> {
@@ -71,6 +76,8 @@ class NanoBotAgentManager extends BaseAgentManager<NanoBotAgentManagerData> {
 
     // Emit to frontend via unified conversation stream
     ipcBridge.conversation.responseStream.emit(msg);
+    // Also emit to main-process-local bus so TeammateManager can receive events
+    teamEventBus.emit('responseStream', msg);
   }
 
   private handleSignalEvent(message: IResponseMessage): void {
@@ -79,19 +86,22 @@ class NanoBotAgentManager extends BaseAgentManager<NanoBotAgentManagerData> {
     // Handle finish event
     if (msg.type === 'finish') {
       cronBusyGuard.setProcessing(this.conversation_id, false);
+      skillSuggestWatcher.onFinish(this.conversation_id);
     }
 
     // Emit signal events to frontend
     ipcBridge.conversation.responseStream.emit(msg);
+    // Also emit to main-process-local bus so TeammateManager can receive events
+    teamEventBus.emit('responseStream', msg);
   }
 
-  async sendMessage(data: { content: string; files?: string[]; msg_id?: string }) {
+  async sendMessage(data: { content: string; files?: string[]; msg_id?: string; hidden?: boolean; silent?: boolean }) {
     cronBusyGuard.setProcessing(this.conversation_id, true);
     try {
       await this.bootstrap;
 
       // Save user message to chat history (frontend handles display directly)
-      if (data.msg_id && data.content) {
+      if (data.msg_id && data.content && !data.silent) {
         const userMessage: TMessage = {
           id: data.msg_id,
           msg_id: data.msg_id,
@@ -100,6 +110,7 @@ class NanoBotAgentManager extends BaseAgentManager<NanoBotAgentManagerData> {
           conversation_id: this.conversation_id,
           content: { content: data.content },
           createdAt: Date.now(),
+          ...(data.hidden && { hidden: true }),
         };
         addMessage(this.conversation_id, userMessage);
       }
@@ -138,6 +149,7 @@ class NanoBotAgentManager extends BaseAgentManager<NanoBotAgentManagerData> {
     }
 
     ipcBridge.conversation.responseStream.emit(message);
+    teamEventBus.emit('responseStream', message);
   }
 
   /**

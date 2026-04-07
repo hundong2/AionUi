@@ -5,7 +5,8 @@
  */
 
 import { ipcBridge } from '@/common';
-import { cronService } from '@process/services/cron/CronService';
+import { cronService } from '@process/services/cron/cronServiceSingleton';
+import { writeRawCronSkillFile, hasCronSkillFile } from '@process/services/cron/cronSkillFile';
 
 /**
  * Initialize cron IPC bridge handlers
@@ -26,19 +27,30 @@ export function initCronBridge(): void {
 
   // CRUD handlers
   ipcBridge.cron.addJob.provider(async (params) => {
-    const job = await cronService.addJob(params);
-    ipcBridge.cron.onJobCreated.emit(job);
-    return job;
+    return cronService.addJob(params);
   });
 
   ipcBridge.cron.updateJob.provider(async ({ jobId, updates }) => {
-    const job = await cronService.updateJob(jobId, updates);
-    ipcBridge.cron.onJobUpdated.emit(job);
-    return job;
+    return cronService.updateJob(jobId, updates);
   });
 
   ipcBridge.cron.removeJob.provider(async ({ jobId }) => {
     await cronService.removeJob(jobId);
-    ipcBridge.cron.onJobRemoved.emit({ jobId });
+  });
+
+  ipcBridge.cron.runNow.provider(async ({ jobId }) => {
+    // Create conversation (if needed) and return immediately.
+    // Message sending runs in background; frontend navigates to the conversation.
+    const conversationId = await cronService.runNow(jobId);
+    return { conversationId };
+  });
+
+  // Skill management
+  ipcBridge.cron.saveSkill.provider(async ({ jobId, content }) => {
+    await writeRawCronSkillFile(jobId, content);
+  });
+
+  ipcBridge.cron.hasSkill.provider(async ({ jobId }) => {
+    return hasCronSkillFile(jobId);
   });
 }

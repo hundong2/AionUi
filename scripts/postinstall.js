@@ -10,7 +10,6 @@ const { execSync } = require('child_process');
 
 function runPostInstall() {
   try {
-
     // Check if we're in a CI environment
     const isCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
     const electronVersion = require('../package.json').devDependencies.electron.replace(/^[~^]/, '');
@@ -25,12 +24,12 @@ function runPostInstall() {
     } else {
       // In local environment, use electron-builder to install dependencies
       console.log('Local environment, installing app deps');
-      execSync('npx electron-builder install-app-deps', {
+      execSync('bunx electron-builder install-app-deps', {
         stdio: 'inherit',
         env: {
           ...process.env,
-          npm_config_build_from_source: 'true'
-        }
+          npm_config_build_from_source: 'true',
+        },
       });
     }
   } catch (e) {

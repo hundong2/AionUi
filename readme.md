@@ -30,11 +30,11 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> | <a href="./readme_ch.md">简体中文</a> | <a href="./readme_tw.md">繁體中文</a> | <a href="./readme_jp.md">日本語</a> | <a href="./readme_ko.md">한국어</a> | <a href="./readme_es.md">Español</a> | <a href="./readme_pt.md">Português</a> | <a href="./readme_tr.md">Türkçe</a> | <a href="https://www.aionui.com" target="_blank">Official Website</a>
+  <strong>English</strong> | <a href="./docs/readme/readme_ch.md">简体中文</a> | <a href="./docs/readme/readme_tw.md">繁體中文</a> | <a href="./docs/readme/readme_jp.md">日本語</a> | <a href="./docs/readme/readme_ko.md">한국어</a> | <a href="./docs/readme/readme_es.md">Español</a> | <a href="./docs/readme/readme_pt.md">Português</a> | <a href="./docs/readme/readme_tr.md">Türkçe</a> | <a href="https://www.aionui.com" target="_blank">Official Website</a>
 </p>
 
 <p align="center">
-  <strong>💬 Community:</strong> <a href="https://discord.gg/2QAwJn7Egx" target="_blank">Discord (English)</a> | <a href="./resources/wechat_group.png" target="_blank">微信 (中文群)</a> | <a href="https://twitter.com/AionUI" target="_blank">Twitter</a>
+  <strong>💬 Community:</strong> <a href="https://discord.gg/2QAwJn7Egx" target="_blank">Discord (English)</a> | <a href="./resources/wx-6.png" target="_blank">微信 (中文群)</a> | <a href="https://twitter.com/AionUI" target="_blank">Twitter</a>
 </p>
 
 ---
@@ -83,6 +83,59 @@ AionUi ships with a complete AI agent engine. Unlike tools that require you to i
 <p align="center">
   <img src="./resources/build-in agents.png" alt="Built-in Agents" width="800">
 </p>
+
+### **Office assistants — PPT, Word & Excel**
+
+These tracks match what the app actually ships: **Morph PPT** presets and the **`pptx` / `docx` / `xlsx` skills** (see `assistant/` presets and `skills/` in the repo). Want document/table output? AionUi’s built-in **[OfficeCLI](https://github.com/iOfficeAI/OfficeCli)** helps PPT (Morph), Word (`.docx`), and Excel (`.xlsx/.xlsm/.csv`) go from request to deliverable faster and more reliably.
+The three assistant types map to file workflows, and the final outputs are directly editable and reusable.
+
+#### **PPT assistant**
+
+> **Output:** editable Morph PPT (`.pptx`)
+> Morph-animated slide-to-slide transitions with coherent story pacing; powered by [OfficeCLI](https://github.com/iOfficeAI/OfficeCli).
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./resources/morph-ppt-balanced.gif" alt="Morph PPT — slide-to-slide transitions (OfficeCLI)" width="390">
+    </td>
+    <td align="center" width="50%">
+      <img src="./resources/readme-demo-assistant-ppt.gif" alt="PPT assistant — screen recording" width="390">
+    </td>
+  </tr>
+</table>
+
+#### **Word assistant**
+
+> **Output:** editable Word (`.docx`)
+> Paper/thesis writing and production-ready document editing via the `docx` skill; powered by [OfficeCLI](https://github.com/iOfficeAI/OfficeCli).
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./resources/readme-demo-generate-academic-paper.gif" alt="Generate academic paper demo" width="390">
+    </td>
+    <td align="center" width="50%">
+      <img src="./resources/readme-demo-assistant-write-paper.gif" alt="Paper writing assistant demo" width="390">
+    </td>
+  </tr>
+</table>
+
+#### **Excel assistant**
+
+> **Output:** usable Excel (`.xlsx/.xlsm/.csv`)
+> Generate/refresh spreadsheets with `xlsx` for analysis, auto-formatting, and charts; powered by [OfficeCLI](https://github.com/iOfficeAI/OfficeCli).
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./resources/readme-demo-generate-excel.gif" alt="Excel generation demo" width="390">
+    </td>
+    <td align="center" width="50%">
+      <img src="./resources/readme-demo-assistant-excel.gif" alt="Excel assistant demo" width="390">
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -194,8 +247,10 @@ _Your 24/7 AI assistant — access AionUi from any device, anywhere._
 > **Setup:** AionUi Settings → WebUI Settings → Channel, configure the Bot Token.
 
 <p align="center">
-  <img src="./resources/remote-telegram copy.png" alt="Cowork from Anywhere" width="800">
+  <img src="./resources/webui-remote.gif" alt="WebUI remote access demo" width="800">
 </p>
+
+<p align="center"><em>Remote control &amp; monitor your agent — Claude, Gemini, Codex. Use from browser or phone, same as Claude Code remote.</em></p>
 
 > [Remote Internet Access Tutorial](https://github.com/iOfficeAI/AionUi/wiki/Remote-Internet-Access-Guide-Chinese)
 
@@ -549,7 +604,7 @@ brew install aionui
 - [Report Issues](https://github.com/iOfficeAI/AionUi/issues) — bugs and feature requests
 - [Release Updates](https://github.com/iOfficeAI/AionUi/releases) — get the latest version
 - [Discord Community](https://discord.gg/2QAwJn7Egx) — English community
-- [WeChat Group](./resources/wechat_group.png) — Chinese community
+- [WeChat Group](./resources/wx-6.png) — Chinese community
 
 ### Contributing
 

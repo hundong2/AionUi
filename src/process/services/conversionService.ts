@@ -7,7 +7,8 @@
 import type { ConversionResult, ExcelWorkbookData, PPTJsonData } from '@/common/types/conversion';
 import { DOMParser } from '@xmldom/xmldom';
 import { Document as DocxDocument, Packer, Paragraph, TextRun } from 'docx';
-import { BrowserWindow } from 'electron';
+import type { BrowserWindow } from 'electron';
+import { electronBrowserWindow as BrowserWindowCtor } from '@/common/electronSafe';
 import fs from 'fs/promises';
 import mammoth from 'mammoth';
 import PPTX2Json from 'pptx2json';
@@ -38,7 +39,10 @@ class ConversionService {
       return { success: true, data: markdown };
     } catch (error) {
       console.error('[ConversionService] wordToMarkdown failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
@@ -76,7 +80,10 @@ class ConversionService {
       return { success: true };
     } catch (error) {
       console.error('[ConversionService] markdownToWord failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
@@ -104,7 +111,10 @@ class ConversionService {
       return { success: true, data: { sheets } };
     } catch (error) {
       console.error('[ConversionService] excelToJson failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
@@ -129,7 +139,10 @@ class ConversionService {
       return { success: true };
     } catch (error) {
       console.error('[ConversionService] jsonToExcel failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
@@ -201,14 +214,28 @@ class ConversionService {
       };
     } catch (error) {
       console.error('[ConversionService] pptToJson failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
   /**
    * 提取 Excel 中的图片资源，并且定位到对应单元格
    */
-  private async extractExcelImages(buffer: Buffer): Promise<Record<string, { row: number; col: number; src: string; width?: number; height?: number }[]>> {
+  private async extractExcelImages(buffer: Buffer): Promise<
+    Record<
+      string,
+      {
+        row: number;
+        col: number;
+        src: string;
+        width?: number;
+        height?: number;
+      }[]
+    >
+  > {
     try {
       const fileMap = await this.loadExcelZipEntries(buffer);
       const workbookXml = fileMap.get('xl/workbook.xml');
@@ -239,14 +266,25 @@ class ConversionService {
       }
 
       const parser = new DOMParser();
-      const result: Record<string, { row: number; col: number; src: string; width?: number; height?: number }[]> = {};
+      const result: Record<
+        string,
+        {
+          row: number;
+          col: number;
+          src: string;
+          width?: number;
+          height?: number;
+        }[]
+      > = {};
 
       for (const sheetInfo of sheetInfos) {
         const sheetRelPath = this.getRelsPath(sheetInfo.path);
         const sheetRelXml = sheetRelPath ? fileMap.get(sheetRelPath) : null;
         if (!sheetRelXml) continue;
         const sheetRelMap = this.parseRelationships(sheetRelXml);
-        const drawingRels = Array.from(sheetRelMap.values()).filter((rel) => rel.type === ConversionService.DRAWING_REL_TYPE);
+        const drawingRels = Array.from(sheetRelMap.values()).filter(
+          (rel) => rel.type === ConversionService.DRAWING_REL_TYPE
+        );
         if (drawingRels.length === 0) continue;
 
         for (const drawingRel of drawingRels) {
@@ -268,7 +306,13 @@ class ConversionService {
             if (!imageBuffer) return;
             const mime = this.getMimeTypeFromName(imagePath);
             const src = `data:${mime};base64,${imageBuffer.toString('base64')}`;
-            (result[sheetInfo.name] ||= []).push({ row: anchor.row, col: anchor.col, src, width: anchor.width, height: anchor.height });
+            (result[sheetInfo.name] ||= []).push({
+              row: anchor.row,
+              col: anchor.col,
+              src,
+              width: anchor.width,
+              height: anchor.height,
+            });
           });
         }
       }
@@ -283,9 +327,22 @@ class ConversionService {
   /**
    * 解析 Drawing XML 中的图片锚点信息
    */
-  private parseDrawingAnchors(doc: Document): Array<{ row: number; col: number; embedId: string; width?: number; height?: number }> {
+  private parseDrawingAnchors(doc: Document): Array<{
+    row: number;
+    col: number;
+    embedId: string;
+    width?: number;
+    height?: number;
+  }> {
     const anchors: Element[] = [];
-    const anchorTags = ['xdr:twoCellAnchor', 'xdr:oneCellAnchor', 'xdr:absoluteAnchor', 'twoCellAnchor', 'oneCellAnchor', 'absoluteAnchor'];
+    const anchorTags = [
+      'xdr:twoCellAnchor',
+      'xdr:oneCellAnchor',
+      'xdr:absoluteAnchor',
+      'twoCellAnchor',
+      'oneCellAnchor',
+      'absoluteAnchor',
+    ];
     anchorTags.forEach((tag) => {
       const nodes = doc.getElementsByTagName(tag);
       for (let i = 0; i < nodes.length; i++) {
@@ -300,7 +357,13 @@ class ConversionService {
     const colTags = ['xdr:col', 'col'];
     const sizeTags = ['xdr:ext', 'a:ext', 'ext'];
 
-    const entries: Array<{ row: number; col: number; embedId: string; width?: number; height?: number }> = [];
+    const entries: Array<{
+      row: number;
+      col: number;
+      embedId: string;
+      width?: number;
+      height?: number;
+    }> = [];
 
     anchors.forEach((anchor) => {
       const blip = this.findFirstChild(anchor, blipTags);
@@ -397,7 +460,15 @@ class ConversionService {
 
   private shouldKeepZipEntry(path: string): boolean {
     if (!path.startsWith('xl/')) return false;
-    return path === 'xl/workbook.xml' || path === 'xl/_rels/workbook.xml.rels' || path.startsWith('xl/worksheets/') || path.startsWith('xl/worksheets/_rels/') || path.startsWith('xl/drawings/') || path.startsWith('xl/drawings/_rels/') || path.startsWith('xl/media/');
+    return (
+      path === 'xl/workbook.xml' ||
+      path === 'xl/_rels/workbook.xml.rels' ||
+      path.startsWith('xl/worksheets/') ||
+      path.startsWith('xl/worksheets/_rels/') ||
+      path.startsWith('xl/drawings/') ||
+      path.startsWith('xl/drawings/_rels/') ||
+      path.startsWith('xl/media/')
+    );
   }
 
   private normalizeZipPath(filePath: string): string {
@@ -471,7 +542,8 @@ class ConversionService {
     return 'application/octet-stream';
   }
 
-  private static readonly DRAWING_REL_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing';
+  private static readonly DRAWING_REL_TYPE =
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing';
 
   /**
    * HTML -> PDF
@@ -480,9 +552,15 @@ class ConversionService {
    * 使用隐藏的 BrowserWindow 进行渲染和打印
    */
   public async htmlToPdf(html: string, targetPath: string): Promise<ConversionResult<void>> {
+    if (!BrowserWindowCtor) {
+      return {
+        success: false,
+        error: 'PDF export is not available in standalone mode',
+      };
+    }
     let win: BrowserWindow | null = null;
     try {
-      win = new BrowserWindow({
+      win = new BrowserWindowCtor({
         show: false,
         webPreferences: {
           nodeIntegration: false,
@@ -517,7 +595,10 @@ class ConversionService {
       return { success: true };
     } catch (error) {
       console.error('[ConversionService] htmlToPdf failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     } finally {
       if (win) {
         win.close();
@@ -555,7 +636,10 @@ class ConversionService {
       return await this.htmlToPdf(html, targetPath);
     } catch (error) {
       console.error('[ConversionService] markdownToPdf failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 }

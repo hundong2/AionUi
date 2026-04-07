@@ -4,14 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IProvider } from '@/common/storage';
+import type { IProvider } from '@/common/config/storage';
 import { uuid } from '@/common/utils';
-import { type ProtocolDetectionRequest, type ProtocolDetectionResponse, type ProtocolType, type MultiKeyTestResult, parseApiKeys, maskApiKey, normalizeBaseUrl, removeApiPathSuffix, guessProtocolFromUrl, guessProtocolFromKey, getProtocolDisplayName } from '@/common/utils/protocolDetector';
+import {
+  type ProtocolDetectionRequest,
+  type ProtocolDetectionResponse,
+  type ProtocolType,
+  type MultiKeyTestResult,
+  parseApiKeys,
+  maskApiKey,
+  normalizeBaseUrl,
+  removeApiPathSuffix,
+  guessProtocolFromUrl,
+  guessProtocolFromKey,
+  getProtocolDisplayName,
+} from '@/common/utils/protocolDetector';
 import { isGoogleApisHost } from '@/common/utils/urlValidation';
 import OpenAI from 'openai';
 import { isNewApiPlatform } from '@/common/utils/platformConstants';
-import { ipcBridge } from '../../common';
-import { ProcessConfig } from '../initStorage';
+import { ipcBridge } from '@/common';
+import { ProcessConfig } from '@process/utils/initStorage';
+import { ExtensionRegistry } from '@process/extensions';
 import { BedrockClient, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
 
 /**
@@ -61,12 +74,22 @@ function getBedrockModelDisplayName(modelId: string): string {
 }
 
 export function initModelBridge(): void {
-  ipcBridge.mode.fetchModelList.provider(async function fetchModelList({ base_url, api_key, try_fix, platform, bedrockConfig }): Promise<{ success: boolean; msg?: string; data?: { mode: Array<string | { id: string; name: string }>; fix_base_url?: string } }> {
+  ipcBridge.mode.fetchModelList.provider(async function fetchModelList({
+    base_url,
+    api_key,
+    try_fix,
+    platform,
+    bedrockConfig,
+  }): Promise<{
+    success: boolean;
+    msg?: string;
+    data?: { mode: Array<string | { id: string; name: string }>; fix_base_url?: string };
+  }> {
     // 如果是多key（包含逗号或回车），只取第一个key来获取模型列表
     // If multiple keys (comma or newline separated), use only the first one
-    let actualApiKey = api_key;
-    if (api_key && (api_key.includes(',') || api_key.includes('\n'))) {
-      actualApiKey = api_key.split(/[,\n]/)[0].trim();
+    let actualApiKey = api_key?.trim();
+    if (actualApiKey && (actualApiKey.includes(',') || actualApiKey.includes('\n'))) {
+      actualApiKey = actualApiKey.split(/[,\n]/)[0].trim();
     }
 
     // 如果是 Vertex AI 平台，直接返回 Vertex AI 支持的模型列表
@@ -84,12 +107,55 @@ export function initModelBridge(): void {
       console.log('Using MiniMax model list (text models only)');
       const minimaxModels = [
         // Text/Chat Models - For conversational AI use
+        'MiniMax-M2.7',
+        'MiniMax-M2.5',
         'MiniMax-M2.1', // 230B params, 10B active - Best for programming & reasoning (~60 tokens/sec)
         'MiniMax-M2.1-lightning', // Same as M2.1 but faster (~100 tokens/sec)
         'MiniMax-M2', // 200k context, 128k output - Complex reasoning & function calling
         'M2-her', // Role-play & character-driven conversations
       ];
       return { success: true, data: { mode: minimaxModels } };
+    }
+
+    // 如果是 DashScope Coding Plan，验证 API Key 后返回支持的模型列表
+    // DashScope Coding Plan does not provide /v1/models endpoint (returns 404)
+    // Validate API key via /chat/completions probe, then return hardcoded list
+    if (base_url && isDashScopeCodingAPI(base_url)) {
+      const codingPlanModels = [
+        'qwen3-coder-plus',
+        'qwen3-coder-next',
+        'qwen3.5-plus',
+        'qwen3-max-2026-01-23',
+        'glm-4.7',
+        'glm-5',
+        'MiniMax-M2.5',
+        'kimi-k2.5',
+      ];
+
+      // Validate the API key by probing the chat/completions endpoint
+      if (actualApiKey) {
+        try {
+          const probeUrl = `${base_url.replace(/\/+$/, '')}/chat/completions`;
+          const probeResponse = await fetch(probeUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${actualApiKey}` },
+            body: JSON.stringify({
+              model: codingPlanModels[0],
+              messages: [{ role: 'user', content: 'hi' }],
+              max_tokens: 1,
+            }),
+          });
+          if (probeResponse.status === 401) {
+            const errorData = await probeResponse.json().catch(() => ({}));
+            const errorMsg = errorData?.error?.message || errorData?.message || 'Invalid API key or token expired';
+            return { success: false, msg: errorMsg };
+          }
+        } catch {
+          // Network error during probe - still return model list, user will see error when chatting
+        }
+      }
+
+      return { success: true, data: { mode: codingPlanModels } };
     }
 
     // 如果是 Anthropic/Claude 平台，使用 Anthropic API 获取模型列表
@@ -123,7 +189,12 @@ export function initModelBridge(): void {
         // Fall back to default model list on API failure
         const errorMessage = e instanceof Error ? e.message : String(e);
         console.warn('Failed to fetch Anthropic models via API, falling back to default list:', errorMessage);
-        const defaultAnthropicModels = ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-3-7-sonnet-20250219', 'claude-3-haiku-20240307'];
+        const defaultAnthropicModels = [
+          'claude-sonnet-4-20250514',
+          'claude-opus-4-20250514',
+          'claude-3-7-sonnet-20250219',
+          'claude-3-haiku-20240307',
+        ];
         return { success: true, data: { mode: defaultAnthropicModels } };
       }
     }
@@ -133,21 +204,26 @@ export function initModelBridge(): void {
     // new-api 暴露标准的 /v1/models 端点，直接走 OpenAI 路径
     // new-api exposes standard /v1/models endpoint, use OpenAI path directly
     if (isNewApiPlatform(platform)) {
+      // Validate API key before creating OpenAI client to avoid unhandled 'Missing credentials' error
+      if (!actualApiKey) {
+        return { success: false, msg: 'API key is required. Please configure your API key in settings.' };
+      }
+
       // 确保 base_url 带有 /v1 后缀 / Ensure base_url has /v1 suffix
       let openaiBaseUrl = base_url?.replace(/\/+$/, '') || '';
       if (openaiBaseUrl && !openaiBaseUrl.endsWith('/v1')) {
         openaiBaseUrl = `${openaiBaseUrl}/v1`;
       }
 
-      const openai = new OpenAI({
-        baseURL: openaiBaseUrl,
-        apiKey: actualApiKey,
-        defaultHeaders: {
-          'User-Agent': 'AionUI/1.0',
-        },
-      });
-
       try {
+        const openai = new OpenAI({
+          baseURL: openaiBaseUrl,
+          apiKey: actualApiKey,
+          defaultHeaders: {
+            'User-Agent': 'AionUI/1.0',
+          },
+        });
+
         const res = await openai.models.list();
         if (res.data?.length === 0) {
           throw new Error('Invalid response: empty data');
@@ -194,7 +270,9 @@ export function initModelBridge(): void {
 
           // Filter inference profiles that contain Claude models
           const inferenceProfiles = response.inferenceProfileSummaries || [];
-          const claudeProfiles = inferenceProfiles.filter((profile) => profile.inferenceProfileId?.includes('anthropic.claude'));
+          const claudeProfiles = inferenceProfiles.filter((profile) =>
+            profile.inferenceProfileId?.includes('anthropic.claude')
+          );
 
           if (claudeProfiles.length === 0) {
             return {
@@ -284,17 +362,22 @@ export function initModelBridge(): void {
       }
     }
 
-    const openai = new OpenAI({
-      baseURL: base_url,
-      apiKey: actualApiKey,
-      // 使用自定义 User-Agent，避免某些 API 中转站（如 packyapi）拦截 OpenAI SDK 默认的 User-Agent
-      // Use custom User-Agent to avoid some API proxies (like packyapi) blocking OpenAI SDK's default User-Agent
-      defaultHeaders: {
-        'User-Agent': 'AionUI/1.0',
-      },
-    });
+    // Validate API key before creating OpenAI client to avoid unhandled 'Missing credentials' error
+    if (!actualApiKey) {
+      return { success: false, msg: 'API key is required. Please configure your API key in settings.' };
+    }
 
     try {
+      const openai = new OpenAI({
+        baseURL: base_url,
+        apiKey: actualApiKey,
+        // 使用自定义 User-Agent，避免某些 API 中转站（如 packyapi）拦截 OpenAI SDK 默认的 User-Agent
+        // Use custom User-Agent to avoid some API proxies (like packyapi) blocking OpenAI SDK's default User-Agent
+        defaultHeaders: {
+          'User-Agent': 'AionUI/1.0',
+        },
+      });
+
       const res = await openai.models.list();
       // 检查返回的数据是否有效，LM Studio 获取失败时仍会返回空数据
       // Check if response data is valid, LM Studio returns empty data on failure
@@ -311,15 +394,28 @@ export function initModelBridge(): void {
       // If it's a clear API key issue, return error directly without trying to fix URL
       // 注意：403 可能是 URL 错误（如缺少 /v1）也可能是权限问题，需要根据错误消息判断
       // Note: 403 could be URL error (missing /v1) or permission issue, need to check error message
-      const isAuthError = e.status === 401 || e.message?.includes('401') || e.message?.includes('Unauthorized') || e.message?.includes('Invalid API key');
-      const isPermissionError = e.message?.includes('已被禁用') || e.message?.includes('disabled') || e.message?.includes('quota') || e.message?.includes('rate limit');
+      const isAuthError =
+        e.status === 401 ||
+        e.message?.includes('401') ||
+        e.message?.includes('Unauthorized') ||
+        e.message?.includes('Invalid API key');
+      const isPermissionError =
+        e.message?.includes('已被禁用') ||
+        e.message?.includes('disabled') ||
+        e.message?.includes('quota') ||
+        e.message?.includes('rate limit');
       if (isAuthError || isPermissionError) {
         return errRes;
       }
 
       // 用户输入的 URL 已经请求失败，按优先级尝试多种可能的 URL 格式
       // User's URL request failed, try multiple possible URL formats with priority
-      const url = new URL(base_url);
+      let url: URL;
+      try {
+        url = new URL(base_url);
+      } catch {
+        return { success: false, msg: `Invalid URL: ${base_url}` };
+      }
       const pathname = url.pathname.replace(/\/+$/, ''); // 移除末尾斜杠 / Remove trailing slashes
       const base = `${url.protocol}//${url.host}`;
 
@@ -410,10 +506,10 @@ export function initModelBridge(): void {
   ipcBridge.mode.getModelConfig.provider(() => {
     return ProcessConfig.get('model.config')
       .then((data) => {
-        if (!data) return [];
+        const sourceList = Array.isArray(data) ? data : [];
 
         // Handle migration from old IModel format to new IProvider format
-        return data.map((v: any, _index: number) => {
+        const normalizedProviders = sourceList.map((v: any) => {
           // Check if this is old format (has 'selectedModel' field) vs new format (has 'useModel')
           if ('selectedModel' in v && !('useModel' in v)) {
             // Migrate from old format
@@ -423,7 +519,7 @@ export function initModelBridge(): void {
               id: v.id || uuid(),
               capabilities: v.capabilities || [], // Add missing capabilities field
               contextLimit: v.contextLimit, // Keep existing contextLimit if present
-            };
+            } as IProvider;
             // Note: we don't delete selectedModel here as this is read-only migration
           }
 
@@ -432,8 +528,39 @@ export function initModelBridge(): void {
             ...v,
             id: v.id || uuid(),
             useModel: v.useModel || v.selectedModel || '', // Fallback for edge cases
-          };
+          } as IProvider;
         });
+
+        // Merge extension-contributed model providers (with user overrides from persisted config)
+        try {
+          const registry = ExtensionRegistry.getInstance();
+          const extensionProviders = registry.getModelProviders();
+          if (!extensionProviders || extensionProviders.length === 0) {
+            return normalizedProviders;
+          }
+
+          const extensionIds = new Set(extensionProviders.map((provider) => provider.id));
+          const userProviders = normalizedProviders.filter((provider) => !extensionIds.has(provider.id));
+
+          const mergedExtensionProviders: IProvider[] = extensionProviders.map((provider) => {
+            const existing = normalizedProviders.find((item) => item.id === provider.id);
+            return {
+              ...existing,
+              id: provider.id,
+              platform: provider.platform,
+              name: provider.name,
+              baseUrl: existing?.baseUrl || provider.baseUrl || '',
+              apiKey: existing?.apiKey || '',
+              model: Array.isArray(existing?.model) && existing.model.length > 0 ? existing.model : provider.models,
+              enabled: existing?.enabled ?? true,
+            } as IProvider;
+          });
+
+          return [...userProviders, ...mergedExtensionProviders];
+        } catch (error) {
+          console.warn('[ModelBridge] Failed to merge extension model providers:', error);
+          return normalizedProviders;
+        }
       })
       .catch(() => {
         return [] as IProvider[];
@@ -441,8 +568,16 @@ export function initModelBridge(): void {
   });
 
   // 协议检测接口实现 / Protocol detection implementation
-  ipcBridge.mode.detectProtocol.provider(async function detectProtocol(request: ProtocolDetectionRequest): Promise<{ success: boolean; msg?: string; data?: ProtocolDetectionResponse }> {
-    const { baseUrl: rawBaseUrl, apiKey: apiKeyString, timeout = 10000, testAllKeys = false, preferredProtocol } = request;
+  ipcBridge.mode.detectProtocol.provider(async function detectProtocol(
+    request: ProtocolDetectionRequest
+  ): Promise<{ success: boolean; msg?: string; data?: ProtocolDetectionResponse }> {
+    const {
+      baseUrl: rawBaseUrl,
+      apiKey: apiKeyString,
+      timeout = 10000,
+      testAllKeys = false,
+      preferredProtocol,
+    } = request;
 
     const baseUrl = normalizeBaseUrl(rawBaseUrl);
     const baseUrlCandidates = buildBaseUrlCandidates(baseUrl);
@@ -641,7 +776,11 @@ async function testProtocol(
  * 测试 Gemini 协议
  * Test Gemini protocol
  */
-async function testGeminiProtocol(baseUrl: string, apiKey: string, signal: AbortSignal): Promise<{ success: boolean; confidence: number; error?: string; models?: string[]; fixedBaseUrl?: string }> {
+async function testGeminiProtocol(
+  baseUrl: string,
+  apiKey: string,
+  signal: AbortSignal
+): Promise<{ success: boolean; confidence: number; error?: string; models?: string[]; fixedBaseUrl?: string }> {
   // Gemini API Key 格式: AIza...
   // 尝试多个可能的端点
   const endpoints = [
@@ -696,7 +835,11 @@ async function testGeminiProtocol(baseUrl: string, apiKey: string, signal: Abort
  * 测试 OpenAI 协议
  * Test OpenAI protocol
  */
-async function testOpenAIProtocol(baseUrl: string, apiKey: string, signal: AbortSignal): Promise<{ success: boolean; confidence: number; error?: string; models?: string[]; fixedBaseUrl?: string }> {
+async function testOpenAIProtocol(
+  baseUrl: string,
+  apiKey: string,
+  signal: AbortSignal
+): Promise<{ success: boolean; confidence: number; error?: string; models?: string[]; fixedBaseUrl?: string }> {
   // 尝试多个可能的端点
   const endpoints = [
     { url: `${baseUrl}/models`, path: '' },
@@ -746,6 +889,51 @@ async function testOpenAIProtocol(baseUrl: string, apiKey: string, signal: Abort
     }
   }
 
+  // /models endpoints all failed (e.g. 404). Probe /chat/completions to confirm
+  // the endpoint is OpenAI-compatible even when it doesn't support model listing
+  // (DashScope Coding Plan, some proxies, etc.)
+  const chatProbeEndpoints = [
+    { url: `${baseUrl}/chat/completions`, path: '' },
+    { url: `${baseUrl}/v1/chat/completions`, path: '/v1' },
+  ];
+
+  for (const endpoint of chatProbeEndpoints) {
+    try {
+      const response = await fetch(endpoint.url, {
+        method: 'POST',
+        signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model: '_probe', messages: [{ role: 'user', content: '' }], max_tokens: 1 }),
+      });
+
+      if (response.status === 401) {
+        return { success: false, confidence: 70, error: 'Invalid API key for OpenAI protocol' };
+      }
+
+      const data = await response.json().catch((): null => null);
+      if (data?.error && typeof data.error === 'object' && 'message' in data.error) {
+        // OpenAI-style error response confirms the protocol
+        return {
+          success: true,
+          confidence: 75,
+          fixedBaseUrl: endpoint.path ? `${baseUrl}${endpoint.path}` : undefined,
+        };
+      }
+      if (data?.choices && Array.isArray(data.choices)) {
+        return {
+          success: true,
+          confidence: 85,
+          fixedBaseUrl: endpoint.path ? `${baseUrl}${endpoint.path}` : undefined,
+        };
+      }
+    } catch {
+      // Continue
+    }
+  }
+
   return { success: false, confidence: 0, error: 'Not an OpenAI-compatible API endpoint' };
 }
 
@@ -782,7 +970,11 @@ function isAnthropicResponse(data: unknown): boolean {
  * 测试 Anthropic 协议
  * Test Anthropic protocol
  */
-async function testAnthropicProtocol(baseUrl: string, apiKey: string, signal: AbortSignal): Promise<{ success: boolean; confidence: number; error?: string; models?: string[]; fixedBaseUrl?: string }> {
+async function testAnthropicProtocol(
+  baseUrl: string,
+  apiKey: string,
+  signal: AbortSignal
+): Promise<{ success: boolean; confidence: number; error?: string; models?: string[]; fixedBaseUrl?: string }> {
   // Anthropic 没有 models 端点，需要用 messages 端点测试
   // 发送一个最小请求来验证认证
   const endpoints = [
@@ -818,7 +1010,12 @@ async function testAnthropicProtocol(baseUrl: string, apiKey: string, signal: Ab
 
       // 200 表示成功
       if (response.ok && isAnthropicResponse(responseData)) {
-        const models = ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-3-5-sonnet-20241022'];
+        const models = [
+          'claude-3-opus-20240229',
+          'claude-3-sonnet-20240229',
+          'claude-3-haiku-20240307',
+          'claude-3-5-sonnet-20241022',
+        ];
         return {
           success: true,
           confidence: 95,
@@ -833,7 +1030,12 @@ async function testAnthropicProtocol(baseUrl: string, apiKey: string, signal: Ab
           return { success: false, confidence: 70, error: 'Invalid API key for Anthropic protocol' };
         }
         // 400 参数错误但认证成功（Anthropic 格式验证通过）
-        const models = ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-3-5-sonnet-20241022'];
+        const models = [
+          'claude-3-opus-20240229',
+          'claude-3-sonnet-20240229',
+          'claude-3-haiku-20240307',
+          'claude-3-5-sonnet-20241022',
+        ];
         return {
           success: true,
           confidence: 90,
@@ -922,7 +1124,29 @@ function isMiniMaxAPI(baseUrl: string): boolean {
     const hostname = url.hostname.toLowerCase();
     // 精确匹配 minimaxi.com、minimax.io 或其子域名
     // Exact match minimaxi.com, minimax.io or their subdomains
-    return hostname === 'minimaxi.com' || hostname.endsWith('.minimaxi.com') || hostname === 'minimax.io' || hostname.endsWith('.minimax.io');
+    return (
+      hostname === 'minimaxi.com' ||
+      hostname.endsWith('.minimaxi.com') ||
+      hostname === 'minimax.io' ||
+      hostname.endsWith('.minimax.io')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 检测是否为 DashScope Coding Plan API
+ * Check if it's DashScope Coding Plan API (coding.dashscope.aliyuncs.com or coding-intl.dashscope.aliyuncs.com)
+ *
+ * DashScope Coding Plan 不提供 /v1/models 端点（返回 404），需要使用预设模型列表
+ * DashScope Coding Plan does not provide /v1/models endpoint (returns 404), needs hardcoded model list
+ */
+function isDashScopeCodingAPI(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    const hostname = url.hostname.toLowerCase();
+    return hostname === 'coding.dashscope.aliyuncs.com' || hostname === 'coding-intl.dashscope.aliyuncs.com';
   } catch {
     return false;
   }
@@ -954,7 +1178,12 @@ function isPackyAPI(baseUrl: string): boolean {
  * 返回 i18n key 和参数，前端负责翻译
  * Return i18n key and params, frontend handles translation
  */
-function generateSuggestion(protocol: ProtocolType, _confidence: number, baseUrl: string, error?: string): ProtocolDetectionResponse['suggestion'] {
+function generateSuggestion(
+  protocol: ProtocolType,
+  _confidence: number,
+  baseUrl: string,
+  error?: string
+): ProtocolDetectionResponse['suggestion'] {
   if (protocol === 'unknown') {
     if (error?.includes('timeout') || error?.includes('Timeout')) {
       return {
@@ -988,7 +1217,8 @@ function generateSuggestion(protocol: ProtocolType, _confidence: number, baseUrl
       // Detected OpenAI format (with /v1), suggest Claude format (without /v1) is also available
       return {
         type: 'none',
-        message: 'PackyAPI: Detected OpenAI format. For Claude format, use URL without /v1 and select Anthropic platform',
+        message:
+          'PackyAPI: Detected OpenAI format. For Claude format, use URL without /v1 and select Anthropic platform',
         i18nKey: 'settings.packyapiOpenAIDetected',
       };
     }
@@ -997,7 +1227,8 @@ function generateSuggestion(protocol: ProtocolType, _confidence: number, baseUrl
       // Detected Anthropic format (without /v1), suggest OpenAI format (with /v1) is also available
       return {
         type: 'none',
-        message: 'PackyAPI: Detected Claude format. For OpenAI format, add /v1 to URL and select OpenAI/Custom platform',
+        message:
+          'PackyAPI: Detected Claude format. For OpenAI format, add /v1 to URL and select OpenAI/Custom platform',
         i18nKey: 'settings.packyapiAnthropicDetected',
       };
     }

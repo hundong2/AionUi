@@ -2,7 +2,12 @@ const { Arch } = require('builder-util');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { normalizeArch, rebuildSingleModule, verifyModuleBinary, getModulesToRebuild } = require('./rebuildNativeModules');
+const {
+  normalizeArch,
+  rebuildSingleModule,
+  verifyModuleBinary,
+  getModulesToRebuild,
+} = require('./rebuildNativeModules');
 
 /**
  * afterPack hook for electron-builder
@@ -142,7 +147,10 @@ module.exports = async function afterPack(context) {
           }
         }
         // Handle regular packages
-        else if (module.includes(`-${wrongArchSuffix}`) || module.includes(`-${electronPlatformName}-${wrongArchSuffix}`)) {
+        else if (
+          module.includes(`-${wrongArchSuffix}`) ||
+          module.includes(`-${electronPlatformName}-${wrongArchSuffix}`)
+        ) {
           if (fs.existsSync(modulePath) && fs.statSync(modulePath).isDirectory()) {
             fs.rmSync(modulePath, { recursive: true, force: true });
             console.log(`   ✓ Removed ${module}`);
@@ -164,10 +172,10 @@ module.exports = async function afterPack(context) {
 
     console.log(`   ✓ Found ${moduleName}, rebuilding for ${targetArch}...`);
 
-    // For Windows cross-compilation (x64 → ARM64), use prebuild-install to download prebuilt binaries
-    // Only force rebuild for same-architecture builds (ensures correct Electron ABI version)
-    const isWindowsCrossCompile = electronPlatformName === 'win32' && isCrossCompile;
-    const forceRebuildFromSource = electronPlatformName === 'win32' && !isWindowsCrossCompile;
+    // For Windows, prefer prebuild-install first (faster and more reliable in CI)
+    // electron-rebuild can hang on "Searching dependency tree" in some CI environments
+    // prebuild-install will fall back to electron-rebuild internally if no prebuilt binary exists
+    const forceRebuildFromSource = false; // Always try prebuild-install first
 
     const success = rebuildSingleModule({
       moduleName,
@@ -177,7 +185,7 @@ module.exports = async function afterPack(context) {
       electronVersion,
       projectRoot: path.resolve(__dirname, '..'),
       buildArch: buildArch, // Pass build architecture for cross-compile detection
-      forceRebuild: forceRebuildFromSource, // Windows same-arch: force rebuild; Windows cross-arch: use prebuild-install; Linux: prefer prebuilt binaries
+      forceRebuild: forceRebuildFromSource, // Always try prebuild-install first, fallback to rebuild
     });
 
     if (success) {

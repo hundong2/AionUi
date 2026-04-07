@@ -10,7 +10,8 @@ import { Close } from '@icon-park/react';
 import classNames from 'classnames';
 import type { CSSProperties } from 'react';
 import React from 'react';
-import { useThemeContext } from '@/renderer/context/ThemeContext';
+import { useTranslation } from 'react-i18next';
+import { useThemeContext } from '@/renderer/hooks/context/ThemeContext';
 
 // ==================== 类型定义导出 ====================
 
@@ -97,7 +98,8 @@ export interface AionModalProps extends Omit<ModalProps, 'title' | 'footer'> {
 
 const HEADER_BASE_CLASS = 'flex items-center justify-between pb-20px';
 const TITLE_BASE_CLASS = 'text-18px font-500 text-t-primary m-0';
-const CLOSE_BUTTON_CLASS = 'w-32px h-32px flex items-center justify-center rd-8px transition-colors duration-200 cursor-pointer border-0 bg-transparent p-0 hover:bg-2 focus:outline-none';
+const CLOSE_BUTTON_CLASS =
+  'w-32px h-32px flex items-center justify-center rd-8px transition-colors duration-200 cursor-pointer border-0 bg-transparent p-0 hover:bg-2 focus:outline-none';
 const FOOTER_BASE_CLASS = 'flex-shrink-0 bg-transparent';
 
 /**
@@ -175,6 +177,7 @@ const AionModal: React.FC<AionModalProps> = ({
   ...props
 }) => {
   const { fontScale } = useThemeContext();
+  const { t } = useTranslation();
   // 处理 contentStyle 配置，转换为 CSS 变量
   const contentBg = contentStyle?.background || 'var(--bg-1)';
   const contentBorderRadius = contentStyle?.borderRadius || '16px';
@@ -281,8 +284,8 @@ const AionModal: React.FC<AionModalProps> = ({
 
     // 未提供 footer 时，使用默认模板
     if (footer === undefined) {
-      const cancelLabel = props.cancelText ?? 'Cancel';
-      const okLabel = props.okText ?? 'Confirm';
+      const cancelLabel = props.cancelText ?? t('common.cancel', { defaultValue: 'Cancel' });
+      const okLabel = props.okText ?? t('common.confirm', { defaultValue: 'Confirm' });
       return {
         render: () => (
           <div className='flex justify-end gap-10px mt-10px'>
@@ -291,7 +294,13 @@ const AionModal: React.FC<AionModalProps> = ({
             <Button onClick={onCancel} className='px-20px min-w-80px' style={{ borderRadius: 8 }}>
               {cancelLabel}
             </Button>
-            <Button type='primary' onClick={props.onOk} loading={props.confirmLoading} className='px-20px min-w-80px' style={{ borderRadius: 8 }}>
+            <Button
+              type='primary'
+              onClick={props.onOk}
+              loading={props.confirmLoading}
+              className='px-20px min-w-80px'
+              style={{ borderRadius: 8 }}
+            >
               {okLabel}
             </Button>
           </div>
@@ -306,7 +315,7 @@ const AionModal: React.FC<AionModalProps> = ({
       };
     }
     return footer as ModalFooterConfig;
-  }, [footer, onCancel, props.cancelText, props.okText, props.onOk, props.confirmLoading]);
+  }, [footer, onCancel, props.cancelText, props.okText, props.onOk, props.confirmLoading, t]);
 
   // 渲染 Header
   const renderHeader = () => {
@@ -363,7 +372,16 @@ const AionModal: React.FC<AionModalProps> = ({
   };
 
   return (
-    <Modal {...props} title={null} closable={false} footer={null} onCancel={onCancel} className={`aionui-modal ${className}`} style={finalStyle} getPopupContainer={() => document.body}>
+    <Modal
+      {...props}
+      title={null}
+      closable={false}
+      footer={null}
+      onCancel={onCancel}
+      className={`aionui-modal ${className}`}
+      style={finalStyle}
+      getPopupContainer={() => document.body}
+    >
       <div className='aionui-modal-wrapper' style={{ borderRadius: borderRadiusVal }}>
         {renderHeader()}
         <div className='aionui-modal-body-content' style={bodyInlineStyle}>

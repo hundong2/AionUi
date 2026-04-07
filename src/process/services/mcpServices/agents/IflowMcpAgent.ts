@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import type { McpOperationResult } from '../McpProtocol';
 import { AbstractMcpAgent } from '../McpProtocol';
-import type { IMcpServer } from '../../../../common/storage';
+import type { IMcpServer } from '@/common/config/storage';
 import { getEnhancedEnv } from '@process/utils/shellEnv';
+import { safeExec } from '@process/utils/safeExec';
 
-const execAsync = promisify(exec);
 /** Env options for exec calls — ensures CLI is found from Finder/launchd launches */
-const getExecEnv = () => ({ env: { ...getEnhancedEnv(), NODE_OPTIONS: '' } });
+const getExecEnv = () => ({
+  env: { ...getEnhancedEnv(), NODE_OPTIONS: '', TERM: 'dumb', NO_COLOR: '1' } as NodeJS.ProcessEnv,
+});
 
 /**
  * iFlow CLI MCP代理实现
@@ -35,7 +35,7 @@ export class IflowMcpAgent extends AbstractMcpAgent {
   private async detectMcpServersInternal(_cliPath?: string): Promise<IMcpServer[]> {
     try {
       // 使用iFlow CLI list命令获取MCP配置
-      const { stdout: result } = await execAsync('iflow mcp list', { timeout: this.timeout, ...getExecEnv() });
+      const { stdout: result } = await safeExec('iflow mcp list', { timeout: this.timeout, ...getExecEnv() });
 
       // 如果没有配置任何MCP服务器，返回空数组
       if (result.trim() === 'No MCP servers configured.' || !result.trim()) {
@@ -55,7 +55,9 @@ export class IflowMcpAgent extends AbstractMcpAgent {
           .trim();
         /* eslint-enable no-control-regex */
         // 查找格式如: "✓ Bazi: npx bazi-mcp (stdio) - Connected" 或 "✓ Bazi: npx bazi-mcp (stdio) - 已连接"
-        const match = cleanLine.match(/[✓✗]\s+([^:]+):\s+(.+?)\s+\(([^)]+)\)\s*-\s*(Connected|Disconnected|已连接|已断开)/);
+        const match = cleanLine.match(
+          /[✓✗]\s+([^:]+):\s+(.+?)\s+\(([^)]+)\)\s*-\s*(Connected|Disconnected|已连接|已断开)/
+        );
         if (match) {
           const [, name, commandStr, transport, statusRaw] = match;
           const commandParts = commandStr.trim().split(/\s+/);
@@ -182,7 +184,12 @@ export class IflowMcpAgent extends AbstractMcpAgent {
                   addCommand += ` --env "${key}=${value}"`;
                 }
               }
-            } else if ((server.transport.type === 'sse' || server.transport.type === 'http' || server.transport.type === 'streamable_http') && 'url' in server.transport) {
+            } else if (
+              (server.transport.type === 'sse' ||
+                server.transport.type === 'http' ||
+                server.transport.type === 'streamable_http') &&
+              'url' in server.transport
+            ) {
               // iFlow CLI 使用 --transport http 处理 HTTP 和 Streamable HTTP
               const transportFlag = server.transport.type === 'streamable_http' ? 'http' : server.transport.type;
               addCommand += ` "${server.transport.url}"`;
@@ -205,7 +212,7 @@ export class IflowMcpAgent extends AbstractMcpAgent {
             addCommand += ' -s user';
 
             // 执行添加命令
-            await execAsync(addCommand, { timeout: 10000, ...getExecEnv() });
+            await safeExec(addCommand, { timeout: 10000, ...getExecEnv() });
           } catch (error) {
             console.warn(`Failed to add MCP server ${server.name} to iFlow:`, error);
             // 继续处理其他服务器，不要因为一个失败就停止整个过程
@@ -232,23 +239,26 @@ export class IflowMcpAgent extends AbstractMcpAgent {
         // 首先尝试user作用域（与安装时保持一致），然后尝试project作用域
         try {
           const removeCommand = `iflow mcp remove "${mcpServerName}" -s user`;
-          await execAsync(removeCommand, { timeout: 5000, ...getExecEnv() });
+          await safeExec(removeCommand, { timeout: 5000, ...getExecEnv() });
           return { success: true };
         } catch (userError) {
           // user作用域失败，尝试project作用域
           try {
             const removeCommand = `iflow mcp remove "${mcpServerName}" -s project`;
-            const { stdout } = await execAsync(removeCommand, { timeout: 5000, ...getExecEnv() });
+            const { stdout } = await safeExec(removeCommand, { timeout: 5000, ...getExecEnv() });
 
             // 检查输出是否包含"not found"，如果是则继续尝试user作用域
             if (stdout && stdout.includes('not found')) {
-              throw new Error('Server not found in project settings');
+              throw new Error('Server not found in project settings', { cause: userError });
             }
 
             return { success: true };
           } catch (projectError) {
             // 如果服务器不存在，也认为是成功的
-            if (userError instanceof Error && (userError.message.includes('not found') || userError.message.includes('does not exist'))) {
+            if (
+              userError instanceof Error &&
+              (userError.message.includes('not found') || userError.message.includes('does not exist'))
+            ) {
               return { success: true };
             }
             return { success: false, error: userError instanceof Error ? userError.message : String(userError) };
